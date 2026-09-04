@@ -1,0 +1,706 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ISE Troubleshooter</title>
+<style>
+  :root {
+    --bg: #0b0f14;
+    --panel: #121820;
+    --panel-2: #182029;
+    --border: #232d3a;
+    --text: #e6edf3;
+    --text-dim: #8b96a5;
+    --accent: #00bceb; /* Cisco teal */
+    --accent-dim: #0891b2;
+    --ok: #22c55e;
+    --err: #ef4444;
+    --warn: #f59e0b;
+    --mono: "Cascadia Code", "Consolas", monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: "Segoe UI", system-ui, sans-serif;
+    height: 100vh; display: flex; flex-direction: column;
+  }
+  header {
+    padding: 14px 22px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 12px;
+    background: linear-gradient(180deg, #0e141b, #0b0f14);
+  }
+  header h1 { font-size: 17px; margin: 0; font-weight: 600; letter-spacing: .3px; }
+  header .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-dim); display: inline-block; margin-right: 6px; }
+  header .dot.ok { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+  header .dot.err { background: var(--err); box-shadow: 0 0 6px var(--err); }
+  .status { font-size: 12px; color: var(--text-dim); margin-left: auto; display: flex; gap: 18px; }
+
+  .layout { flex: 1; display: grid; grid-template-columns: 300px 1fr; overflow: hidden; }
+  aside { border-right: 1px solid var(--border); padding: 18px; overflow-y: auto; background: var(--panel); }
+  main { padding: 22px; overflow-y: auto; }
+
+  .card {
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px;
+    padding: 14px; margin-bottom: 16px;
+  }
+  .card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .6px; color: var(--text-dim); margin: 0 0 10px; }
+  label { font-size: 12px; color: var(--text-dim); display: block; margin: 8px 0 3px; }
+  input[type=text], input[type=password], input[type=number], select {
+    width: 100%; padding: 8px 10px; background: #0c1218; border: 1px solid var(--border);
+    color: var(--text); border-radius: 6px; font-size: 13px; outline: none;
+  }
+  input:focus, select:focus { border-color: var(--accent); }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .row > * { flex: 1; }
+  .checkbox-row { display: flex; align-items: center; gap: 6px; margin-top: 10px; font-size: 12px; color: var(--text-dim); }
+
+  button {
+    background: var(--accent); color: #001217; border: none; border-radius: 6px;
+    padding: 8px 14px; font-size: 13px; font-weight: 600; cursor: pointer; margin-top: 10px;
+  }
+  button:hover { background: #33d0f5; }
+  button:disabled { background: #2a3441; color: var(--text-dim); cursor: not-allowed; }
+  button.secondary { background: var(--panel); color: var(--text); border: 1px solid var(--border); }
+  button.secondary:hover { background: #1c2530; }
+  button.danger { background: var(--err); color: #fff; }
+  button.danger:hover { background: #f87171; }
+  button.small { padding: 4px 9px; font-size: 11px; margin: 0; }
+
+  .tabs { display: flex; gap: 4px; margin-bottom: 18px; border-bottom: 1px solid var(--border); }
+  .tab { padding: 9px 16px; cursor: pointer; color: var(--text-dim); font-size: 13px; border-bottom: 2px solid transparent; }
+  .tab.active { color: var(--text); border-bottom-color: var(--accent); }
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+
+  .searchbar { display: flex; gap: 8px; align-items: end; margin-bottom: 16px; flex-wrap: wrap; }
+  .searchbar > div { flex: 1; min-width: 160px; }
+  .searchbar button { margin-top: 0; height: 36px; }
+
+  .results-header { display: flex; align-items: center; gap: 10px; margin: 18px 0 8px; }
+  .results-header h3 { font-size: 12px; text-transform: uppercase; color: var(--text-dim); margin: 0; letter-spacing: .5px; flex: 1; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th { color: var(--text-dim); font-weight: 500; font-size: 11px; text-transform: uppercase; }
+  tr:hover td { background: #131b24; }
+  .badge { padding: 2px 8px; border-radius: 20px; font-size: 11px; font-weight: 600; }
+  .badge.AUTHENTICATED, .badge.STARTED, .badge.AUTHORIZED, .badge.passed { background: #123d2b; color: var(--ok); }
+  .badge.FAILED, .badge.DISCONNECTED, .badge.failed { background: #3d1414; color: var(--err); }
+  .actions-cell { display: flex; gap: 6px; }
+
+  .console { background: #05080b; border: 1px solid var(--border); border-radius: 8px; padding: 14px; font-family: var(--mono); font-size: 13px; white-space: pre-wrap; min-height: 320px; max-height: 60vh; overflow-y: auto; }
+  .quick-cmds { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+  .quick-cmds button { margin-top: 0; }
+  .empty { color: var(--text-dim); font-size: 13px; padding: 30px 0; text-align: center; }
+  .err-msg { color: var(--err); font-size: 13px; margin-top: 8px; }
+  .toast { font-size: 12px; margin-top: 8px; padding: 6px 10px; border-radius: 6px; background: #0c1218; border: 1px solid var(--border); }
+  .toast.ok { color: var(--ok); border-color: #123d2b; }
+  .toast.err { color: var(--err); border-color: #3d1414; }
+  .console-actions { display: flex; justify-content: flex-end; margin-bottom: 6px; }
+  .profile-row { display: flex; gap: 6px; margin-top: 10px; }
+  .profile-row select { flex: 2; }
+
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+  .chip { background: var(--panel-2); border: 1px solid var(--border); border-radius: 20px; padding: 4px 12px; font-size: 12px; cursor: pointer; color: var(--text-dim); }
+  .chip:hover { color: var(--text); border-color: var(--accent); }
+
+  .kv-card { background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px 20px; }
+  .kv-card .kv { font-size: 13px; }
+  .kv-card .kv .k { color: var(--text-dim); font-size: 11px; text-transform: uppercase; display: block; }
+
+  .verdict { border-radius: 8px; padding: 14px 16px; font-size: 14px; font-weight: 600; margin-bottom: 16px; border: 1px solid; }
+  .verdict.ok { background: #0d2a1c; color: var(--ok); border-color: #123d2b; }
+  .verdict.err { background: #2a1414; color: var(--err); border-color: #3d1414; }
+  .verdict.warn { background: #2a2110; color: var(--warn); border-color: #4d3a12; }
+  .section-title { font-size: 12px; text-transform: uppercase; color: var(--text-dim); letter-spacing: .5px; margin: 18px 0 8px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>ISE Troubleshooter</h1>
+  <div class="status">
+    <span><span id="ise-dot" class="dot"></span>ISE</span>
+    <span><span id="sw-dot" class="dot"></span>Switch</span>
+  </div>
+</header>
+
+<div class="layout">
+  <aside>
+    <div class="card">
+      <h2>Connessione ISE</h2>
+      <label>Host / IP</label>
+      <input type="text" id="ise-host" placeholder="ise-pan.azienda.local">
+      <label>Username</label>
+      <input type="text" id="ise-user" placeholder="admin">
+      <label>Password</label>
+      <input type="password" id="ise-pass">
+      <div class="row">
+        <div><label>Porta MNT</label><input type="number" id="ise-port" placeholder="443"></div>
+        <div><label>Porta ERS</label><input type="number" id="ise-ers-port" placeholder="443 o 9060"></div>
+      </div>
+      <div class="checkbox-row"><input type="checkbox" id="ise-verify"><label style="margin:0">Verifica certificato SSL</label></div>
+      <button id="ise-test-btn" onclick="testIse()">Test connessione</button>
+      <div id="ise-test-msg" class="err-msg"></div>
+      <div class="profile-row">
+        <select id="ise-profile-select"></select>
+        <button class="secondary small" onclick="saveProfile('ise')">Salva</button>
+        <button class="secondary small" onclick="deleteProfile('ise')">Elimina</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Connessione Switch</h2>
+      <label>Host / IP</label>
+      <input type="text" id="sw-host" placeholder="10.0.0.1">
+      <div class="row">
+        <div><label>Username</label><input type="text" id="sw-user"></div>
+        <div><label>Porta</label><input type="number" id="sw-port" value="22"></div>
+      </div>
+      <label>Password</label>
+      <input type="password" id="sw-pass">
+      <label>Enable secret (opzionale)</label>
+      <input type="password" id="sw-secret">
+      <label>Device type</label>
+      <select id="sw-devtype">
+        <option value="cisco_ios">cisco_ios</option>
+        <option value="cisco_xe">cisco_xe</option>
+        <option value="cisco_nxos">cisco_nxos</option>
+      </select>
+      <label><input type="checkbox" id="sw-advanced"> Modalità avanzata (permette comandi diversi da "show")</label>
+      <div class="profile-row">
+        <select id="sw-profile-select"></select>
+        <button class="secondary small" onclick="saveProfile('sw')">Salva</button>
+        <button class="secondary small" onclick="deleteProfile('sw')">Elimina</button>
+      </div>
+    </div>
+  </aside>
+
+  <main>
+    <div class="tabs">
+      <div class="tab active" data-tab="livelog" onclick="switchTab('livelog')">Live Log</div>
+      <div class="tab" data-tab="console" onclick="switchTab('console')">Switch Console</div>
+      <div class="tab" data-tab="diag" onclick="switchTab('diag')">Diagnostica</div>
+    </div>
+
+    <div id="tab-livelog" class="tab-panel active">
+      <div id="ll-history" class="chips"></div>
+      <div class="searchbar">
+        <div>
+          <label>Cerca per</label>
+          <select id="ll-mode">
+            <option value="mac">MAC Address</option>
+            <option value="user">User Identity</option>
+            <option value="active">Tutte le sessioni attive</option>
+          </select>
+        </div>
+        <div>
+          <label id="ll-value-label">Valore</label>
+          <input type="text" id="ll-value" placeholder="00:11:22:33:44:55">
+        </div>
+        <button onclick="searchLiveLog()">Cerca</button>
+        <div>
+          <label>Auto-refresh</label>
+          <select id="ll-auto">
+            <option value="0">Off</option>
+            <option value="5000">5s</option>
+            <option value="10000">10s</option>
+            <option value="30000">30s</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="results-header">
+        <h3>Sessioni</h3>
+        <button class="secondary small" onclick="exportCsv()">Esporta CSV</button>
+      </div>
+      <div id="ll-results"><div class="empty">Nessuna ricerca eseguita.</div></div>
+      <div id="ll-toast"></div>
+
+      <div id="ll-endpoint-wrap" style="display:none">
+        <div class="results-header"><h3>Contesto endpoint (ERS)</h3></div>
+        <div id="ll-endpoint"></div>
+      </div>
+
+      <div id="ll-authstatus-wrap" style="display:none">
+        <div class="results-header">
+          <h3>Storico autenticazioni (pass/fail, ultime 24h)</h3>
+        </div>
+        <div id="ll-authstatus"></div>
+      </div>
+    </div>
+
+    <div id="tab-console" class="tab-panel">
+      <div class="quick-cmds">
+        <button class="secondary" onclick="quickCmd('show authentication sessions')">show authentication sessions</button>
+        <button class="secondary" onclick="quickCmd('show authentication sessions mac ' + lastMac())">sessions by MAC</button>
+        <button class="secondary" onclick="quickCmd('show mac address-table address ' + lastMac())">mac address-table</button>
+        <button class="secondary" onclick="quickCmd('show authentication sessions interface ')">sessions by interface</button>
+      </div>
+      <div class="row">
+        <input type="text" id="cmd-input" placeholder="show authentication sessions...">
+        <button onclick="runCommand()" style="flex:0 0 auto">Esegui</button>
+      </div>
+      <div class="console-actions">
+        <button class="secondary small" onclick="copyConsoleOutput()">Copia output</button>
+      </div>
+      <div id="console-out" class="console">Pronto.</div>
+    </div>
+
+    <div id="tab-diag" class="tab-panel">
+      <div class="searchbar">
+        <div>
+          <label>MAC Address da diagnosticare</label>
+          <input type="text" id="diag-mac" placeholder="00:11:22:33:44:55">
+        </div>
+        <button onclick="runDiagnosis()">Esegui diagnosi</button>
+      </div>
+      <p style="color:var(--text-dim); font-size:12px; margin-top:-8px">
+        Combina sessione ISE, storico autenticazioni, contesto ERS e (se compilata) la connessione switch a sinistra.
+      </p>
+      <div class="results-header">
+        <h3>Risultato</h3>
+        <button class="secondary small" onclick="exportDiagnosis()">Esporta diagnosi</button>
+      </div>
+      <div id="diag-result"></div>
+    </div>
+  </main>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+
+const JSON_HEADERS = {'Content-Type':'application/json'};
+const FIELDS = ['ise-host','ise-user','ise-pass','ise-verify','ise-port','ise-ers-port','sw-host','sw-user','sw-pass','sw-secret','sw-port','sw-devtype','sw-advanced'];
+FIELDS.forEach(id => {
+  const el = $(id);
+  const saved = sessionStorage.getItem(id);
+  if (saved !== null) { el.type === 'checkbox' ? el.checked = saved === '1' : el.value = saved; }
+  el.addEventListener('change', () => sessionStorage.setItem(id, el.type === 'checkbox' ? (el.checked ? '1' : '0') : el.value));
+});
+
+let lastMacSeen = '';
+function lastMac() { return lastMacSeen; }
+
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.id === 'tab-' + name));
+}
+
+$('ll-mode').addEventListener('change', () => {
+  const mode = $('ll-mode').value;
+  $('ll-value').style.display = mode === 'active' ? 'none' : '';
+  $('ll-value-label').textContent = mode === 'mac' ? 'MAC Address' : mode === 'user' ? 'Username' : '';
+  $('ll-authstatus-wrap').style.display = 'none';
+  $('ll-endpoint-wrap').style.display = 'none';
+});
+
+function iseCreds() {
+  const port = $('ise-port').value.trim();
+  return {
+    host: $('ise-host').value, username: $('ise-user').value, password: $('ise-pass').value,
+    verify_ssl: $('ise-verify').checked, port: port ? parseInt(port, 10) : null
+  };
+}
+
+function iseCredsErs() {
+  const port = $('ise-ers-port').value.trim();
+  return { ...iseCreds(), port: port ? parseInt(port, 10) : null };
+}
+
+function switchCreds() {
+  return {
+    host: $('sw-host').value, username: $('sw-user').value, password: $('sw-pass').value,
+    secret: $('sw-secret').value, port: parseInt($('sw-port').value || '22', 10), device_type: $('sw-devtype').value,
+    advanced: $('sw-advanced').checked
+  };
+}
+
+async function testIse() {
+  const btn = $('ise-test-btn');
+  btn.disabled = true; $('ise-test-msg').textContent = '';
+  try {
+    const r = await fetch('/api/ise/test', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(iseCreds()) });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || 'errore');
+    $('ise-dot').className = 'dot ok';
+  } catch (e) {
+    $('ise-dot').className = 'dot err';
+    $('ise-test-msg').textContent = e.message;
+  } finally { btn.disabled = false; }
+}
+
+// ---- Profiles (host/username only, never password) ----
+function profileKey(kind) { return kind === 'ise' ? 'ise-profiles' : 'sw-profiles'; }
+function profileFields(kind) { return kind === 'ise' ? ['ise-host','ise-user'] : ['sw-host','sw-user']; }
+
+function loadProfiles(kind) {
+  try { return JSON.parse(localStorage.getItem(profileKey(kind)) || '[]'); } catch { return []; }
+}
+
+function renderProfileSelect(kind) {
+  const sel = $(kind + '-profile-select');
+  const profiles = loadProfiles(kind);
+  sel.innerHTML = '<option value="">— profilo —</option>' + profiles.map(p => `<option value="${p.name}">${p.name}</option>`).join('');
+}
+
+function saveProfile(kind) {
+  const name = prompt('Nome profilo:');
+  if (!name) return;
+  const [hostId, userId] = profileFields(kind);
+  const profiles = loadProfiles(kind).filter(p => p.name !== name);
+  profiles.push({ name, host: $(hostId).value, username: $(userId).value });
+  localStorage.setItem(profileKey(kind), JSON.stringify(profiles));
+  renderProfileSelect(kind);
+  $(kind + '-profile-select').value = name;
+}
+
+function deleteProfile(kind) {
+  const sel = $(kind + '-profile-select');
+  if (!sel.value) return;
+  const profiles = loadProfiles(kind).filter(p => p.name !== sel.value);
+  localStorage.setItem(profileKey(kind), JSON.stringify(profiles));
+  renderProfileSelect(kind);
+}
+
+['ise','sw'].forEach(kind => {
+  renderProfileSelect(kind);
+  $(kind + '-profile-select').addEventListener('change', () => {
+    const sel = $(kind + '-profile-select');
+    const profile = loadProfiles(kind).find(p => p.name === sel.value);
+    if (!profile) return;
+    const [hostId, userId] = profileFields(kind);
+    $(hostId).value = profile.host; $(userId).value = profile.username;
+    $(hostId).dispatchEvent(new Event('change')); $(userId).dispatchEvent(new Event('change'));
+  });
+});
+
+// ---- Live Log ----
+let autoTimer = null;
+$('ll-auto').addEventListener('change', () => {
+  clearInterval(autoTimer);
+  const ms = parseInt($('ll-auto').value, 10);
+  if (ms > 0) autoTimer = setInterval(searchLiveLog, ms);
+});
+
+let lastSessions = [];
+let lastMode = 'mac';
+
+// ---- Search history ----
+const HISTORY_KEY = 'll-search-history';
+function loadHistory() { try { return JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]'); } catch { return []; } }
+function pushHistory(mode, value) {
+  const history = loadHistory().filter(h => !(h.mode === mode && h.value === value));
+  history.unshift({ mode, value });
+  localStorage.setItem(HISTORY_KEY, JSON.stringify(history.slice(0, 8)));
+  renderHistory();
+}
+function renderHistory() {
+  const box = $('ll-history');
+  box.innerHTML = loadHistory().map((h, i) =>
+    `<span class="chip" onclick="applyHistory(${i})">${h.mode === 'mac' ? 'MAC' : 'user'}: ${h.value}</span>`
+  ).join('');
+}
+function applyHistory(i) {
+  const h = loadHistory()[i];
+  if (!h) return;
+  $('ll-mode').value = h.mode;
+  $('ll-mode').dispatchEvent(new Event('change'));
+  $('ll-value').value = h.value;
+  searchLiveLog();
+}
+renderHistory();
+
+async function searchLiveLog() {
+  const mode = $('ll-mode').value;
+  lastMode = mode;
+  const value = $('ll-value').value.trim();
+  const box = $('ll-results');
+  box.innerHTML = '<div class="empty">Ricerca in corso...</div>';
+  $('ll-toast').innerHTML = '';
+  $('ll-authstatus-wrap').style.display = 'none';
+  $('ll-endpoint-wrap').style.display = 'none';
+  try {
+    let url, body = iseCreds();
+    if (mode === 'mac') { url = '/api/ise/session/mac'; body.mac = value; lastMacSeen = value; }
+    else if (mode === 'user') { url = '/api/ise/session/user'; body.identity = value; }
+    else { url = '/api/ise/session/active'; }
+
+    const r = await fetch(url, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    const sessions = await r.json();
+    if (!r.ok) throw new Error(sessions.detail || 'errore');
+    $('ise-dot').className = 'dot ok';
+    lastSessions = sessions;
+    renderSessions(sessions);
+    if (mode === 'mac' && value) { loadAuthStatus(value); loadEndpointContext(value); }
+    if (mode !== 'active' && value) pushHistory(mode, value);
+  } catch (e) {
+    $('ise-dot').className = 'dot err';
+    lastSessions = [];
+    box.innerHTML = `<div class="err-msg">${e.message}</div>`;
+  }
+}
+
+function renderSessions(sessions) {
+  const box = $('ll-results');
+  if (!sessions.length) { box.innerHTML = '<div class="empty">Nessuna sessione trovata.</div>'; return; }
+  const cols = ['user_name','calling_station_id','framed_ip_address','nas_ip_address','nas_port_id','session_status','posture_status','acs_server'];
+  let html = '<table><thead><tr>' + cols.map(c => `<th>${c.replace(/_/g,' ')}</th>`).join('') + '<th>Azioni</th></tr></thead><tbody>';
+  sessions.forEach((s, i) => {
+    html += '<tr>' + cols.map(c => {
+      const v = s[c] || '-';
+      if (c === 'session_status' || c === 'posture_status') return `<td><span class="badge ${v}">${v}</span></td>`;
+      return `<td>${v}</td>`;
+    }).join('') + `<td class="actions-cell">
+        <button class="secondary small" onclick="gotoSwitchAt(${i})">Switch</button>
+        <button class="secondary small" onclick="reauthAt(${i})">Riautentica</button>
+        <button class="danger small" onclick="disconnectAt(${i})">Disconnetti</button>
+      </td></tr>`;
+  });
+  html += '</tbody></table>';
+  box.innerHTML = html;
+}
+
+function toast(msg, ok) {
+  $('ll-toast').innerHTML = `<div class="toast ${ok ? 'ok' : 'err'}">${msg}</div>`;
+}
+
+function macOf(session) { return session.calling_station_id || $('ll-value').value.trim(); }
+
+function gotoSwitchAt(i) {
+  const s = lastSessions[i];
+  if (s.nas_ip_address) { $('sw-host').value = s.nas_ip_address; $('sw-host').dispatchEvent(new Event('change')); }
+  switchTab('console');
+  const mac = macOf(s);
+  if (s.nas_port_id) runCommands([`show authentication sessions interface ${s.nas_port_id}`, `show interface ${s.nas_port_id} status`]);
+  else runCommands([`show authentication sessions mac ${mac}`]);
+}
+
+async function reauthAt(i) {
+  const s = lastSessions[i];
+  const psn = s.acs_server;
+  const mac = macOf(s);
+  if (!psn || !mac) { toast('Dati sessione insufficienti per il reauth (manca acs_server o MAC).', false); return; }
+  if (!confirm(`Forzare la ri-autenticazione (reauth) di ${mac}?`)) return;
+  try {
+    const body = { ...iseCreds(), psn_name: psn, mac, reauth_type: 0 };
+    const r = await fetch('/api/ise/coa/reauth', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || 'errore');
+    toast(`Reauth inviato (${mac}): risposta ISE = ${data.result}`, true);
+  } catch (e) { toast('Reauth fallito: ' + e.message, false); }
+}
+
+async function disconnectAt(i) {
+  const s = lastSessions[i];
+  const mac = macOf(s);
+  const mntNode = s.acs_server;
+  const switchIp = s.device_ip_address || s.nas_ip_address;
+  const psnIp = s.destination_ip_address || $('ise-host').value;
+  if (!mntNode || !mac || !switchIp) { toast('Dati sessione insufficienti per il disconnect.', false); return; }
+  if (!confirm(`Disconnettere la sessione di ${mac}?`)) return;
+  try {
+    const body = { ...iseCreds(), mnt_node: mntNode, mac, switch_ip: switchIp, psn_ip: psnIp, disconnect_type: 0 };
+    const r = await fetch('/api/ise/coa/disconnect', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || 'errore');
+    toast(`Disconnect inviato (${mac}): risposta ISE = ${data.result}`, true);
+  } catch (e) { toast('Disconnect fallito: ' + e.message, false); }
+}
+
+async function loadAuthStatus(mac) {
+  const wrap = $('ll-authstatus-wrap');
+  const box = $('ll-authstatus');
+  wrap.style.display = '';
+  box.innerHTML = '<div class="empty">Caricamento...</div>';
+  try {
+    const body = { ...iseCreds(), mac, seconds: 86400, records: 20 };
+    const r = await fetch('/api/ise/authstatus', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    const records = await r.json();
+    if (!r.ok) throw new Error(records.detail || 'errore');
+    if (!records.length) { box.innerHTML = '<div class="empty">Nessun tentativo di autenticazione nelle ultime 24h.</div>'; return; }
+    let html = '<table><thead><tr><th>Timestamp</th><th>Esito</th><th>Utente</th><th>Motivo fallimento</th></tr></thead><tbody>';
+    for (const rec of records) {
+      const status = (rec.passed !== undefined ? (rec.passed ? 'passed' : 'failed') : (rec.status || '')).toString().toLowerCase();
+      html += `<tr><td>${rec.acs_timestamp || rec.timestamp || '-'}</td><td><span class="badge ${status}">${status || '-'}</span></td><td>${rec.user_name || '-'}</td><td>${rec.failure_reason || '-'}</td></tr>`;
+    }
+    html += '</tbody></table>';
+    box.innerHTML = html;
+  } catch (e) {
+    box.innerHTML = `<div class="err-msg">${e.message}</div>`;
+  }
+}
+
+function kvCard(fields) {
+  return '<div class="kv-card">' + fields.map(([k, v]) => `<div class="kv"><span class="k">${k}</span><span>${v ?? '-'}</span></div>`).join('') + '</div>';
+}
+
+async function loadEndpointContext(mac) {
+  const wrap = $('ll-endpoint-wrap');
+  const box = $('ll-endpoint');
+  wrap.style.display = '';
+  box.innerHTML = '<div class="empty">Caricamento...</div>';
+  try {
+    const body = { ...iseCredsErs(), mac };
+    const r = await fetch('/api/ise/endpoint-context', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(body) });
+    const ctx = await r.json();
+    if (!r.ok) throw new Error(ctx.detail || 'errore');
+    if (!ctx) { box.innerHTML = '<div class="empty">Endpoint sconosciuto a ISE (non profilato via ERS).</div>'; return; }
+    box.innerHTML = kvCard([
+      ['MAC', ctx.mac], ['Gruppo identità', ctx.identity_group],
+      ['Static group assignment', ctx.static_group_assignment], ['Static profile assignment', ctx.static_profile_assignment],
+      ['Profile ID', ctx.profile_id], ['Portal user', ctx.portal_user],
+    ]);
+  } catch (e) {
+    box.innerHTML = `<div class="err-msg">${e.message}</div>`;
+  }
+}
+
+function exportCsv() {
+  if (!lastSessions.length) return;
+  const cols = Object.keys(lastSessions[0]);
+  const rows = [cols.join(',')].concat(lastSessions.map(s => cols.map(c => `"${(s[c] || '').toString().replace(/"/g,'""')}"`).join(',')));
+  const blob = new Blob([rows.join('\n')], { type: 'text/csv' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `ise-live-log-${Date.now()}.csv`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+// ---- Switch Console ----
+function quickCmd(cmd) { $('cmd-input').value = cmd; runCommand(); }
+
+async function execSwitchCommand(command) {
+  const body = { ...switchCreds(), command };
+  const r = await fetch('/api/switch/exec', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(body) });
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.detail || 'errore');
+  $('sw-dot').className = 'dot ok';
+  return data.output || '(output vuoto)';
+}
+
+async function runCommand() {
+  const command = $('cmd-input').value.trim();
+  if (!command) return;
+  runCommands([command]);
+}
+
+async function runCommands(commands) {
+  const out = $('console-out');
+  out.textContent = '';
+  for (const command of commands) {
+    out.textContent += `$ ${command}\n`;
+    try {
+      out.textContent += (await execSwitchCommand(command)) + '\n\n';
+    } catch (e) {
+      $('sw-dot').className = 'dot err';
+      out.textContent += 'Errore: ' + e.message + '\n\n';
+    }
+  }
+}
+
+function copyConsoleOutput() {
+  navigator.clipboard.writeText($('console-out').textContent);
+}
+
+// ---- Diagnostica completa ----
+async function postJson(url, body) {
+  const r = await fetch(url, { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(body) });
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.detail || 'errore');
+  return data;
+}
+
+function computeVerdict(sessions, authRecords, endpointCtx, switchOutput) {
+  const active = sessions.find(s => (s.session_status || '').toUpperCase() === 'AUTHENTICATED');
+  if (active) return { level: 'ok', text: `Sessione attiva e autenticata su ${active.acs_server || 'ISE'} (porta ${active.nas_port_id || '?'}).` };
+  if (switchOutput && /err-disabled/i.test(switchOutput)) return { level: 'err', text: 'La porta dello switch risulta err-disabled: intervento manuale richiesto (shut/no shut dopo aver rimosso la causa).' };
+  const lastFail = authRecords.find(r => r.passed === false || (r.status || '').toLowerCase() === 'failed');
+  if (lastFail) return { level: 'err', text: `Ultimo tentativo di autenticazione fallito: ${lastFail.failure_reason || 'motivo sconosciuto'}.` };
+  if (!sessions.length && !authRecords.length) return { level: 'warn', text: 'Nessuna traccia della MAC in ISE (né sessione né tentativi di autenticazione nelle ultime 24h). Verificare che la porta sia collegata e configurata per 802.1X/MAB.' };
+  return { level: 'warn', text: 'Nessuna sessione attiva al momento, ma sono presenti tracce storiche. Vedere i dettagli sotto.' };
+}
+
+let lastDiagnosis = null;
+
+function renderDiagnosis(mac, { sessions, authRecords, endpointCtx, switchOutput, switchError }) {
+  const verdict = computeVerdict(sessions, authRecords, endpointCtx, switchOutput);
+  lastDiagnosis = { mac, verdict, sessions, authRecords, endpointCtx, switchOutput, switchError };
+  let html = `<div class="verdict ${verdict.level}">${verdict.text}</div>`;
+
+  html += '<div class="section-title">Sessione ISE</div>';
+  html += sessions.length ? kvCard([
+    ['Utente', sessions[0].user_name], ['Stato', sessions[0].session_status],
+    ['NAS', sessions[0].nas_ip_address], ['Porta', sessions[0].nas_port_id], ['ACS server', sessions[0].acs_server],
+  ]) : '<div class="empty">Nessuna sessione attiva.</div>';
+
+  html += '<div class="section-title">Storico autenticazioni (24h)</div>';
+  html += authRecords.length ? kvCard(authRecords.slice(0, 5).map(r => [r.acs_timestamp || r.timestamp || '-', r.failure_reason || 'passed'])) : '<div class="empty">Nessun tentativo registrato.</div>';
+
+  html += '<div class="section-title">Contesto endpoint (ERS)</div>';
+  html += endpointCtx ? kvCard([
+    ['Gruppo identità', endpointCtx.identity_group], ['Profile ID', endpointCtx.profile_id],
+  ]) : '<div class="empty">Endpoint non profilato / ERS non disponibile.</div>';
+
+  html += '<div class="section-title">Switch (show authentication)</div>';
+  html += switchOutput ? `<pre id="diag-switch-out">${switchOutput}</pre>` : `<div class="empty">${switchError || 'Compila le credenziali switch a sinistra per includere questo dato.'}</div>`;
+
+  $('diag-result').innerHTML = html;
+}
+
+async function runDiagnosis() {
+  const mac = $('diag-mac').value.trim();
+  if (!mac) return;
+  $('diag-result').innerHTML = '<div class="empty">Diagnosi in corso...</div>';
+
+  const [sessionsRes, authRes, ctxRes] = await Promise.allSettled([
+    postJson('/api/ise/session/mac', { ...iseCreds(), mac }),
+    postJson('/api/ise/authstatus', { ...iseCreds(), mac, seconds: 86400, records: 20 }),
+    postJson('/api/ise/endpoint-context', { ...iseCredsErs(), mac }),
+  ]);
+  const sessions = sessionsRes.status === 'fulfilled' ? sessionsRes.value : [];
+  const authRecords = authRes.status === 'fulfilled' ? authRes.value : [];
+  const endpointCtx = ctxRes.status === 'fulfilled' ? ctxRes.value : null;
+
+  let switchOutput = null, switchError = null;
+  if ($('sw-host').value) {
+    try { switchOutput = await execSwitchCommand(`show authentication sessions mac ${mac}`); }
+    catch (e) { switchError = 'Errore switch: ' + e.message; }
+  }
+
+  renderDiagnosis(mac, { sessions, authRecords, endpointCtx, switchOutput, switchError });
+}
+
+function exportDiagnosis() {
+  if (!lastDiagnosis) return;
+  const { mac, verdict, sessions, authRecords, endpointCtx, switchOutput, switchError } = lastDiagnosis;
+  const s = sessions[0] || {};
+  let md = `# Diagnostica ISE - ${mac}\n\n`;
+  md += `Generato: ${new Date().toLocaleString()}\n\n`;
+  md += `## Verdetto\n${verdict.text}\n\n`;
+  md += `## Sessione ISE\n`;
+  md += sessions.length
+    ? `- Utente: ${s.user_name || '-'}\n- Stato: ${s.session_status || '-'}\n- NAS: ${s.nas_ip_address || '-'}\n- Porta: ${s.nas_port_id || '-'}\n- ACS server: ${s.acs_server || '-'}\n\n`
+    : 'Nessuna sessione attiva.\n\n';
+  md += `## Storico autenticazioni (24h)\n`;
+  md += authRecords.length
+    ? authRecords.slice(0, 5).map(r => `- ${r.acs_timestamp || r.timestamp || '-'}: ${r.failure_reason || 'passed'}`).join('\n') + '\n\n'
+    : 'Nessun tentativo registrato.\n\n';
+  md += `## Contesto endpoint (ERS)\n`;
+  md += endpointCtx
+    ? `- Gruppo identità: ${endpointCtx.identity_group || '-'}\n- Profile ID: ${endpointCtx.profile_id || '-'}\n\n`
+    : 'Endpoint non profilato / ERS non disponibile.\n\n';
+  md += `## Switch (show authentication)\n`;
+  md += switchOutput ? '```\n' + switchOutput + '\n```\n' : (switchError || 'Non eseguito.') + '\n';
+  const blob = new Blob([md], { type: 'text/markdown' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `ise-diagnosi-${mac.replace(/[^a-zA-Z0-9]/g, '')}-${Date.now()}.md`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+</script>
+</body>
+</html>
