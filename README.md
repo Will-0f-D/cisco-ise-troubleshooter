@@ -14,10 +14,27 @@ Web app per il troubleshooting live di autenticazioni 802.1X/MAB su Cisco ISE: r
 
 ## Requisiti
 
-- Python 3.11+
 - Accesso di rete a ISE (API MNT/ERS) e agli switch (SSH)
+- Solo per l'uso da sorgente: Python 3.11+
+- Solo per generare l'eseguibile: Python 3.11+ e PyInstaller
 
-## Avvio (da sorgente)
+## Installazione ed utilizzo
+
+Ci sono due modi per usare la soluzione: come **eseguibile standalone** (consigliato per un utente finale, es. tecnico dal cliente, nessun Python richiesto) oppure **da sorgente** (per sviluppo/debug).
+
+### Opzione A — Eseguibile standalone (.exe)
+
+Se hai già un `IseTroubleshooter.exe` (es. dalla cartella `backend/dist/` o da una [Release](../../releases) del repository):
+
+1. Copia `IseTroubleshooter.exe` su una qualsiasi macchina Windows con accesso di rete a ISE e agli switch (non serve installare nulla, Python incluso).
+2. Fai doppio clic sull'eseguibile (o lancialo da riga di comando).
+3. Si apre automaticamente il browser su `http://127.0.0.1:8000` con l'interfaccia pronta all'uso.
+4. Inserisci le credenziali ISE (e switch, se necessario) nel pannello laterale e inizia la ricerca.
+5. Il file `audit.log` con la cronologia delle azioni (CoA e comandi switch) viene creato nella stessa cartella dell'eseguibile.
+
+Per chiudere l'applicazione, chiudi la finestra della console dell'eseguibile.
+
+### Opzione B — Da sorgente (sviluppo)
 
 ```bash
 cd backend
@@ -27,19 +44,24 @@ pip install -r requirements.txt
 python -m uvicorn main:app --port 8000
 ```
 
-Poi apri http://127.0.0.1:8000. Su Windows puoi anche lanciare `avvia.bat` dalla root del progetto.
+Poi apri http://127.0.0.1:8000. Su Windows puoi anche lanciare `avvia.bat` dalla root del progetto, che crea il virtualenv, installa le dipendenze e avvia il server automaticamente.
 
-## Eseguibile standalone (Windows)
+## Come generare l'eseguibile (.exe)
 
-Il progetto include uno spec PyInstaller (`backend/IseTroubleshooter.spec`) per generare un `.exe` autonomo (nessun Python richiesto sulla macchina di destinazione):
+Per distribuire la soluzione a chi non ha Python installato, genera un eseguibile standalone con PyInstaller:
 
 ```bash
 cd backend
+python -m venv venv
+venv\Scripts\activate
+pip install -r requirements.txt
 pip install pyinstaller
 pyinstaller IseTroubleshooter.spec
 ```
 
-L'eseguibile viene creato in `backend/dist/IseTroubleshooter.exe` e apre automaticamente il browser all'avvio.
+Al termine, l'eseguibile si trova in `backend/dist/IseTroubleshooter.exe`. È un file unico e autocontenuto (frontend incluso): basta copiarlo sulla macchina di destinazione, senza bisogno di installare Python, dipendenze o altro.
+
+Nota: lo `.exe` va generato sullo stesso sistema operativo su cui verrà eseguito (build su Windows → eseguibile per Windows).
 
 ## Struttura
 
