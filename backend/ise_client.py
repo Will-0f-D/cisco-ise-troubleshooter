@@ -124,6 +124,52 @@ async def coa_disconnect(
     return resp.text.strip()
 
 
+async def _openapi_get(host: str, username: str, password: str, path: str, verify_ssl: bool, port: int | None = None, timeout: float = 15.0) -> httpx.Response:
+    """Cisco ISE Open API (distinct from ERS/MNT): deployment info, licensing, system settings."""
+    netloc = f"{host}:{port}" if port else host
+    url = f"https://{netloc}/api/v1/{path}"
+    try:
+        async with httpx.AsyncClient(verify=verify_ssl, timeout=timeout) as client:
+            resp = await client.get(url, auth=(username, password), headers={"Accept": "application/json"})
+    except httpx.ConnectTimeout as e:
+        raise IseConnectionError(f"Timeout di connessione verso {netloc}") from e
+    except httpx.ConnectError as e:
+        raise IseConnectionError(f"Impossibile raggiungere {netloc}: {e}") from e
+    except httpx.TimeoutException as e:
+        raise IseConnectionError(f"Timeout nella richiesta a {netloc}") from e
+    if resp.status_code == 401:
+        raise IseAuthError("Credenziali rifiutate (401) per l'Open API - è abilitata in Administration > System > API Settings?")
+    return resp
+
+
+async def get_deployment_nodes(host: str, username: str, password: str, verify_ssl: bool = False, port: int | None = None) -> list[dict]:
+    """All nodes in the ISE deployment/cluster, via the Open API (not ERS/MNT)."""
+    resp = await _openapi_get(host, username, password, "deployment/node", verify_ssl, port)
+    resp.raise_for_status()
+    return resp.json().get("response", [])
+
+
+async def get_license_status(host: str, username: str, password: str, verify_ssl: bool = False, port: int | None = None) -> dict:
+    """Tier compliance, evaluation license, and Smart Licensing registration state.
+
+    Each sub-call is independent: if the Open API is disabled or one endpoint fails,
+    the others still return so the UI can show partial data instead of nothing.
+    """
+    result = {}
+    for key, path in (
+        ("tier_state", "license/system/tier-state"),
+        ("eval_license", "license/system/eval-license"),
+        ("registration", "license/system/register"),
+    ):
+        try:
+            resp = await _openapi_get(host, username, password, path, verify_ssl, port)
+            resp.raise_for_status()
+            result[key] = resp.json()
+        except Exception as e:
+            result[key] = {"error": str(e)}
+    return result
+
+
 async def _ers_get(host: str, username: str, password: str, path: str, verify_ssl: bool, port: int | None = None, timeout: float = 15.0) -> httpx.Response:
     netloc = f"{host}:{port}" if port else host
     url = f"https://{netloc}/ers/config/{path}"

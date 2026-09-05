@@ -15,6 +15,8 @@ Backend FastAPI + frontend HTML/JS a file singolo: **nessuna build, nessuna inst
 | **CoA** | Reauth e Disconnect delle sessioni direttamente dai risultati, con conferma esplicita prima dell'invio e registro locale delle azioni. |
 | **Switch Console** | Comandi SSH su switch (Netmiko) con comandi rapidi predefiniti; solo comandi `show` permessi di default (guardrail anti config-mode), "modalità avanzata" attivabile per il resto. |
 | **Diagnostica completa** | Verdetto automatico che incrocia sessione ISE, storico autenticazioni, contesto ERS e output switch; export in Markdown pronto per un ticket. |
+| **Licenze** | Stato di conformità delle licenze (tier), giorni residui della licenza di valutazione e stato di registrazione/connessione Smart Licensing, via ISE Open API. |
+| **Deployment** | Elenco dei nodi del cluster ISE (hostname, FQDN, IP, ruoli, servizi abilitati, stato di connessione), via ISE Open API. |
 | **Profili salvati** | Credenziali ISE/switch (host + username, mai la password) salvabili in locale per riuso rapido. |
 | **Audit log** | Ogni CoA e comando switch eseguito viene registrato su file (`backend/audit.log`) con timestamp, host/utente e comando. |
 | **Auto-refresh** | Aggiornamento automatico configurabile della Live Log. |
@@ -28,7 +30,8 @@ Backend FastAPI + frontend HTML/JS a file singolo: **nessuna build, nessuna inst
 
 ## 📋 Requisiti
 
-- Accesso di rete a ISE (API MNT/ERS) e agli switch (SSH).
+- Accesso di rete a ISE (API MNT/ERS/Open API) e agli switch (SSH).
+- Per le tab Licenze e Deployment: Open API abilitata su ISE (Administration > System > API Settings).
 - Solo per l'uso da sorgente: Python 3.11+.
 - Solo per generare l'eseguibile: Python 3.11+ e PyInstaller.
 

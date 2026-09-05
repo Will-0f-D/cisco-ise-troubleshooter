@@ -183,6 +183,8 @@
       <div class="tab" data-tab="console" onclick="switchTab('console')">Switch Console</div>
       <div class="tab" data-tab="diag" onclick="switchTab('diag')">Diagnostica</div>
       <div class="tab" data-tab="auth" onclick="switchTab('auth')">Autenticazioni</div>
+      <div class="tab" data-tab="license" onclick="switchTab('license')">Licenze</div>
+      <div class="tab" data-tab="deploy" onclick="switchTab('deploy')">Deployment</div>
     </div>
 
     <div id="tab-livelog" class="tab-panel active">
@@ -284,6 +286,31 @@
 
       <div class="results-header"><h3>Storico autenticazioni correlato (pass/fail + CoA)</h3></div>
       <div id="auth-results"><div class="empty">Watchlist vuota o storico non ancora caricato.</div></div>
+    </div>
+
+    <div id="tab-license" class="tab-panel">
+      <p style="color:var(--text-dim); font-size:12px; margin-top:0">
+        Usa le credenziali ISE a sinistra (Open API deve essere abilitata in Administration &gt; System &gt; API Settings).
+      </p>
+      <div class="searchbar">
+        <button onclick="loadLicenseStatus()">Carica stato licenze</button>
+      </div>
+      <div class="section-title">Tier / conformità licenze</div>
+      <div id="license-tier"><div class="empty">Nessun dato caricato.</div></div>
+      <div class="section-title">Licenza di valutazione</div>
+      <div id="license-eval"><div class="empty">Nessun dato caricato.</div></div>
+      <div class="section-title">Registrazione / Smart Licensing</div>
+      <div id="license-registration"><div class="empty">Nessun dato caricato.</div></div>
+    </div>
+
+    <div id="tab-deploy" class="tab-panel">
+      <p style="color:var(--text-dim); font-size:12px; margin-top:0">
+        Elenco dei nodi del deployment/cluster ISE (Open API), con ruoli, servizi abilitati e stato di connessione.
+      </p>
+      <div class="searchbar">
+        <button onclick="loadDeployment()">Carica nodi deployment</button>
+      </div>
+      <div id="deploy-results"><div class="empty">Nessun dato caricato.</div></div>
     </div>
   </main>
 </div>
@@ -723,6 +750,48 @@ function exportDiagnosis() {
   a.download = `ise-diagnosi-${mac.replace(/[^a-zA-Z0-9]/g, '')}-${Date.now()}.md`;
   a.click();
   URL.revokeObjectURL(a.href);
+}
+
+// ---- Licenze e Deployment (Open API) ----
+function renderGenericObject(obj) {
+  if (obj == null) return '<div class="empty">Nessun dato.</div>';
+  if (obj.error) return `<div class="err-msg">${obj.error}</div>`;
+  const entries = Object.entries(obj);
+  if (!entries.length) return '<div class="empty">Vuoto.</div>';
+  return kvCard(entries.map(([k, v]) => [k, typeof v === 'object' && v !== null ? JSON.stringify(v) : v]));
+}
+
+async function loadLicenseStatus() {
+  ['license-tier', 'license-eval', 'license-registration'].forEach(id => $(id).innerHTML = '<div class="empty">Caricamento...</div>');
+  try {
+    const status = await postJson('/api/ise/license/status', iseCreds());
+    $('license-tier').innerHTML = renderGenericObject(status.tier_state);
+    $('license-eval').innerHTML = renderGenericObject(status.eval_license);
+    $('license-registration').innerHTML = renderGenericObject(status.registration);
+  } catch (e) {
+    const msg = `<div class="err-msg">${e.message}</div>`;
+    $('license-tier').innerHTML = msg;
+    $('license-eval').innerHTML = '';
+    $('license-registration').innerHTML = '';
+  }
+}
+
+async function loadDeployment() {
+  const box = $('deploy-results');
+  box.innerHTML = '<div class="empty">Caricamento...</div>';
+  try {
+    const nodes = await postJson('/api/ise/deployment/nodes', iseCreds());
+    if (!nodes.length) { box.innerHTML = '<div class="empty">Nessun nodo restituito.</div>'; return; }
+    let html = '<table><thead><tr><th>Hostname</th><th>FQDN</th><th>IP</th><th>Ruoli</th><th>Servizi</th><th>Stato</th></tr></thead><tbody>';
+    for (const n of nodes) {
+      const connected = (n.nodeStatus || '').toUpperCase() === 'CONNECTED';
+      html += `<tr><td>${n.hostname || '-'}</td><td>${n.fqdn || '-'}</td><td>${n.ipAddress || '-'}</td><td>${(n.roles || []).join(', ') || '-'}</td><td>${(n.services || []).join(', ') || '-'}</td><td><span class="badge ${connected ? 'passed' : 'failed'}">${n.nodeStatus || '-'}</span></td></tr>`;
+    }
+    html += '</tbody></table>';
+    box.innerHTML = html;
+  } catch (e) {
+    box.innerHTML = `<div class="err-msg">${e.message}</div>`;
+  }
 }
 
 // ---- Autenticazioni: watchlist + correlazione CoA ----

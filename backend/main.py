@@ -119,6 +119,22 @@ async def endpoint_context(q: EndpointContextQuery):
         raise HTTPException(400, str(e))
 
 
+@app.post("/api/ise/deployment/nodes")
+async def deployment_nodes(creds: IseCreds):
+    try:
+        return await ise_client.get_deployment_nodes(creds.host, creds.username, creds.password, creds.verify_ssl, creds.port)
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/ise/license/status")
+async def license_status(creds: IseCreds):
+    try:
+        return await ise_client.get_license_status(creds.host, creds.username, creds.password, creds.verify_ssl, creds.port)
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
+
 @app.post("/api/ise/coa/reauth")
 async def coa_reauth(req: CoaReauthRequest):
     try:
