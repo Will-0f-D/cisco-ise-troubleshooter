@@ -182,6 +182,7 @@
       <div class="tab active" data-tab="livelog" onclick="switchTab('livelog')">Live Log</div>
       <div class="tab" data-tab="console" onclick="switchTab('console')">Switch Console</div>
       <div class="tab" data-tab="diag" onclick="switchTab('diag')">Diagnostica</div>
+      <div class="tab" data-tab="auth" onclick="switchTab('auth')">Autenticazioni</div>
     </div>
 
     <div id="tab-livelog" class="tab-panel active">
@@ -264,6 +265,25 @@
         <button class="secondary small" onclick="exportDiagnosis()">Esporta diagnosi</button>
       </div>
       <div id="diag-result"></div>
+    </div>
+
+    <div id="tab-auth" class="tab-panel">
+      <div class="results-header"><h3>Watchlist (MAC monitorati)</h3></div>
+      <div class="row" style="margin-bottom:10px">
+        <input type="text" id="auth-add-mac" placeholder="Aggiungi MAC alla watchlist">
+        <button class="secondary" onclick="addWatchlistManual()" style="flex:0 0 auto">Aggiungi</button>
+        <button onclick="loadAuthWatchlist()" style="flex:0 0 auto">Aggiorna storico</button>
+      </div>
+      <div id="auth-watchlist" class="chips"></div>
+
+      <div class="searchbar">
+        <div class="checkbox-row" style="margin-top:0"><input type="checkbox" id="auth-only-failed"><label style="margin:0">Solo falliti</label></div>
+        <div><label>NAS</label><select id="auth-filter-nas"><option value="">Tutti</option></select></div>
+        <div><label>Motivo fallimento</label><select id="auth-filter-reason"><option value="">Tutti</option></select></div>
+      </div>
+
+      <div class="results-header"><h3>Storico autenticazioni correlato (pass/fail + CoA)</h3></div>
+      <div id="auth-results"><div class="empty">Watchlist vuota o storico non ancora caricato.</div></div>
     </div>
   </main>
 </div>
@@ -433,6 +453,7 @@ async function searchLiveLog() {
     $('ise-dot').className = 'dot ok';
     lastSessions = sessions;
     renderSessions(sessions);
+    sessions.forEach(s => addToWatchlist(macOf(s), s.user_name));
     if (mode === 'mac' && value) { loadAuthStatus(value); loadEndpointContext(value); }
     if (mode !== 'active' && value) pushHistory(mode, value);
   } catch (e) {
@@ -489,6 +510,7 @@ async function reauthAt(i) {
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || 'errore');
     toast(`Reauth inviato (${mac}): risposta ISE = ${data.result}`, true);
+    pushCoaLog(mac, 'Reauth', data.result);
   } catch (e) { toast('Reauth fallito: ' + e.message, false); }
 }
 
@@ -506,6 +528,7 @@ async function disconnectAt(i) {
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || 'errore');
     toast(`Disconnect inviato (${mac}): risposta ISE = ${data.result}`, true);
+    pushCoaLog(mac, 'Disconnect', data.result);
   } catch (e) { toast('Disconnect fallito: ' + e.message, false); }
 }
 
@@ -701,6 +724,128 @@ function exportDiagnosis() {
   a.click();
   URL.revokeObjectURL(a.href);
 }
+
+// ---- Autenticazioni: watchlist + correlazione CoA ----
+const WATCHLIST_KEY = 'auth-watchlist';
+const COA_LOG_KEY = 'coa-action-log';
+
+function loadWatchlist() { try { return JSON.parse(localStorage.getItem(WATCHLIST_KEY) || '[]'); } catch { return []; } }
+function saveWatchlist(list) { localStorage.setItem(WATCHLIST_KEY, JSON.stringify(list)); }
+
+function addToWatchlist(mac, label) {
+  if (!mac) return;
+  const list = loadWatchlist();
+  if (list.some(w => w.mac === mac)) return;
+  list.push({ mac, label: label || '' });
+  saveWatchlist(list);
+  renderWatchlist();
+}
+
+function removeFromWatchlist(mac) {
+  saveWatchlist(loadWatchlist().filter(w => w.mac !== mac));
+  renderWatchlist();
+}
+
+function addWatchlistManual() {
+  const input = $('auth-add-mac');
+  const mac = input.value.trim();
+  if (!mac) return;
+  addToWatchlist(mac, '');
+  input.value = '';
+}
+
+function renderWatchlist() {
+  const box = $('auth-watchlist');
+  const list = loadWatchlist();
+  box.innerHTML = list.length ? list.map(w =>
+    `<span class="chip">${w.label ? w.label + ' - ' : ''}${w.mac} <span onclick="removeFromWatchlist('${w.mac}')" style="cursor:pointer;color:var(--err)">&times;</span></span>`
+  ).join('') : '<div class="empty">Watchlist vuota: cerca un MAC/utente in Live Log oppure aggiungilo qui.</div>';
+}
+renderWatchlist();
+
+function pushCoaLog(mac, action, result) {
+  const log = JSON.parse(localStorage.getItem(COA_LOG_KEY) || '[]');
+  log.push({ ts: Date.now(), mac, action, result: (result ?? '').toString() });
+  localStorage.setItem(COA_LOG_KEY, JSON.stringify(log.slice(-200)));
+}
+
+function coaLogFor(mac) {
+  return JSON.parse(localStorage.getItem(COA_LOG_KEY) || '[]').filter(l => l.mac === mac);
+}
+
+const COA_CORRELATION_WINDOW_MS = 5 * 60 * 1000;
+function findCoaMarkers(mac, recordTs) {
+  const t = new Date(recordTs).getTime();
+  if (isNaN(t)) return [];
+  return coaLogFor(mac).filter(l => Math.abs(l.ts - t) <= COA_CORRELATION_WINDOW_MS);
+}
+
+let lastAuthRows = [];
+
+async function loadAuthWatchlist() {
+  const box = $('auth-results');
+  const list = loadWatchlist();
+  if (!list.length) { box.innerHTML = '<div class="empty">Watchlist vuota.</div>'; return; }
+  box.innerHTML = '<div class="empty">Caricamento...</div>';
+  const creds = iseCreds();
+  const rows = [];
+  for (const w of list) {
+    try {
+      const records = await postJson('/api/ise/authstatus', { ...creds, mac: w.mac, seconds: 86400, records: 30 });
+      records.forEach(r => rows.push({ ...r, _mac: w.mac }));
+    } catch (e) {
+      rows.push({ _mac: w.mac, _error: e.message });
+    }
+  }
+  rows.sort((a, b) => new Date(b.acs_timestamp || b.timestamp || 0) - new Date(a.acs_timestamp || a.timestamp || 0));
+  lastAuthRows = rows;
+  populateAuthFilters(rows);
+  renderAuthTable();
+}
+
+function populateAuthFilters(rows) {
+  const nasSel = $('auth-filter-nas'), reasonSel = $('auth-filter-reason');
+  const nasValues = [...new Set(rows.map(r => r.nas_ip_address).filter(Boolean))];
+  const reasons = [...new Set(rows.map(r => r.failure_reason).filter(Boolean))];
+  nasSel.innerHTML = '<option value="">Tutti</option>' + nasValues.map(v => `<option value="${v}">${v}</option>`).join('');
+  reasonSel.innerHTML = '<option value="">Tutti</option>' + reasons.map(v => `<option value="${v}">${v}</option>`).join('');
+}
+
+function renderAuthTable() {
+  const box = $('auth-results');
+  const onlyFailed = $('auth-only-failed').checked;
+  const nasFilter = $('auth-filter-nas').value;
+  const reasonFilter = $('auth-filter-reason').value;
+
+  const errors = lastAuthRows.filter(r => r._error);
+  let rows = lastAuthRows.filter(r => !r._error).filter(r => {
+    const status = (r.passed !== undefined ? (r.passed ? 'passed' : 'failed') : (r.status || '')).toString().toLowerCase();
+    if (onlyFailed && status !== 'failed') return false;
+    if (nasFilter && r.nas_ip_address !== nasFilter) return false;
+    if (reasonFilter && r.failure_reason !== reasonFilter) return false;
+    return true;
+  });
+
+  if (!rows.length && !errors.length) { box.innerHTML = '<div class="empty">Nessun risultato per i filtri correnti.</div>'; return; }
+
+  let html = errors.map(e => `<div class="err-msg">${e._mac}: ${e._error}</div>`).join('');
+  html += '<table><thead><tr><th>Timestamp</th><th>MAC</th><th>Esito</th><th>Utente</th><th>NAS</th><th>Motivo fallimento</th><th>CoA correlato</th></tr></thead><tbody>';
+  for (const r of rows) {
+    const ts = r.acs_timestamp || r.timestamp || '-';
+    const status = (r.passed !== undefined ? (r.passed ? 'passed' : 'failed') : (r.status || '')).toString().toLowerCase();
+    const markers = findCoaMarkers(r._mac, ts);
+    const coaCell = markers.length
+      ? markers.map(m => `<span class="badge passed" title="${new Date(m.ts).toLocaleString()} - ${m.result}">${m.action}</span>`).join(' ')
+      : '-';
+    html += `<tr><td>${ts}</td><td>${r._mac}</td><td><span class="badge ${status}">${status || '-'}</span></td><td>${r.user_name || '-'}</td><td>${r.nas_ip_address || '-'}</td><td>${r.failure_reason || '-'}</td><td>${coaCell}</td></tr>`;
+  }
+  html += '</tbody></table>';
+  box.innerHTML = html;
+}
+
+['auth-only-failed', 'auth-filter-nas', 'auth-filter-reason'].forEach(id => {
+  $(id).addEventListener('change', renderAuthTable);
+});
 </script>
 </body>
 </html>

@@ -6,4 +6,5 @@ backend/dist/
 backend/audit.log
 graphify-out/
 .claude/
+.serena/
 *.pyc
