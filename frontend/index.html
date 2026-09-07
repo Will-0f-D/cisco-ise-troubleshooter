@@ -491,29 +491,37 @@ async function searchLiveLog() {
   }
 }
 
-// Nome del campo XML per le policy matched non è documentato ufficialmente da Cisco:
-// si prova un elenco di varianti note (snake_case e camelCase), tollerante come il
-// resto del parsing MNT. Se resta vuoto, controllare la risposta grezza in DevTools.
+// Campi confermati da Cisco (docs DevNet, schema "restsdStatus" per ricerca per
+// MAC/utente): identity_policy_matched_rule = policy di autenticazione,
+// authorization_policy = policy di autorizzazione. Le altre varianti restano come
+// fallback per schemi/versioni meno comuni. Nota: la ricerca "Tutte le sessioni
+// attive" usa lo schema ridotto "simpleActiveSession" (solo user_name,
+// calling_station_id, nas_ip_address, acct_session_id, audit_session_id, server) e
+// NON include mai questi campi: per quella modalità restano '-' per limite dell'API.
 function policyOf(s) {
-  const authn = s.authen_rule || s.authentication_policy_matched_rule || s.authenticationPolicyMatched
-    || s.authentication_rule || s.selected_authentication_identity_stores || '-';
-  const authz = s.az_rule || s.authorization_policy_matched_rule || s.authorizationPolicyMatched
-    || s.authorization_rule || s.authorization_profile || s.authorization_policy || '-';
+  const authn = s.identity_policy_matched_rule || s.authen_rule || s.authentication_policy_matched_rule
+    || s.authenticationPolicyMatched || s.authentication_rule || s.selected_authentication_identity_stores || '-';
+  const authz = s.authorization_policy || s.az_rule || s.authorization_policy_matched_rule
+    || s.authorizationPolicyMatched || s.authorization_rule || s.authorization_profile || '-';
   return { authn, authz };
 }
+
+// server = nome campo nello schema ridotto "simpleActiveSession" (ricerca "Tutte le
+// sessioni attive"); acs_server = nome campo nello schema completo (ricerca per MAC/utente).
+function policyServerOf(s) { return s.acs_server || s.server || '-'; }
 
 function renderSessions(sessions) {
   const box = $('ll-results');
   if (!sessions.length) { box.innerHTML = '<div class="empty">Nessuna sessione trovata.</div>'; return; }
-  const cols = ['user_name','calling_station_id','framed_ip_address','nas_ip_address','nas_port_id','session_status','posture_status','acs_server'];
-  let html = '<table><thead><tr>' + cols.map(c => `<th>${c.replace(/_/g,' ')}</th>`).join('') + '<th>Policy autenticazione</th><th>Policy autorizzazione</th><th>Azioni</th></tr></thead><tbody>';
+  const cols = ['user_name','calling_station_id','framed_ip_address','nas_ip_address','nas_port_id','session_status','posture_status'];
+  let html = '<table><thead><tr>' + cols.map(c => `<th>${c.replace(/_/g,' ')}</th>`).join('') + '<th>Policy Server</th><th>Policy autenticazione</th><th>Policy autorizzazione</th><th>Azioni</th></tr></thead><tbody>';
   sessions.forEach((s, i) => {
     const p = policyOf(s);
     html += '<tr>' + cols.map(c => {
       const v = s[c] || '-';
       if (c === 'session_status' || c === 'posture_status') return `<td><span class="badge ${v}">${v}</span></td>`;
       return `<td>${v}</td>`;
-    }).join('') + `<td>${p.authn}</td><td>${p.authz}</td><td class="actions-cell">
+    }).join('') + `<td>${policyServerOf(s)}</td><td>${p.authn}</td><td>${p.authz}</td><td class="actions-cell">
         <button class="secondary small" onclick="gotoSwitchAt(${i})">Switch</button>
         <button class="secondary small" onclick="reauthAt(${i})">Riautentica</button>
         <button class="danger small" onclick="disconnectAt(${i})">Disconnetti</button>
@@ -540,9 +548,9 @@ function gotoSwitchAt(i) {
 
 async function reauthAt(i) {
   const s = lastSessions[i];
-  const psn = s.acs_server;
+  const psn = policyServerOf(s);
   const mac = macOf(s);
-  if (!psn || !mac) { toast('Dati sessione insufficienti per il reauth (manca acs_server o MAC).', false); return; }
+  if (psn === '-' || !mac) { toast('Dati sessione insufficienti per il reauth (manca Policy Server o MAC).', false); return; }
   if (!confirm(`Forzare la ri-autenticazione (reauth) di ${mac}?`)) return;
   try {
     const body = { ...iseCreds(), psn_name: psn, mac, reauth_type: 0 };
@@ -557,10 +565,10 @@ async function reauthAt(i) {
 async function disconnectAt(i) {
   const s = lastSessions[i];
   const mac = macOf(s);
-  const mntNode = s.acs_server;
+  const mntNode = policyServerOf(s);
   const switchIp = s.device_ip_address || s.nas_ip_address;
   const psnIp = s.destination_ip_address || $('ise-host').value;
-  if (!mntNode || !mac || !switchIp) { toast('Dati sessione insufficienti per il disconnect.', false); return; }
+  if (mntNode === '-' || !mac || !switchIp) { toast('Dati sessione insufficienti per il disconnect.', false); return; }
   if (!confirm(`Disconnettere la sessione di ${mac}?`)) return;
   try {
     const body = { ...iseCreds(), mnt_node: mntNode, mac, switch_ip: switchIp, psn_ip: psnIp, disconnect_type: 0 };
@@ -678,7 +686,7 @@ async function postJson(url, body) {
 
 function computeVerdict(sessions, authRecords, endpointCtx, switchOutput) {
   const active = sessions.find(s => (s.session_status || '').toUpperCase() === 'AUTHENTICATED');
-  if (active) return { level: 'ok', text: `Sessione attiva e autenticata su ${active.acs_server || 'ISE'} (porta ${active.nas_port_id || '?'}).` };
+  if (active) return { level: 'ok', text: `Sessione attiva e autenticata su ${policyServerOf(active) !== '-' ? policyServerOf(active) : 'ISE'} (porta ${active.nas_port_id || '?'}).` };
   if (switchOutput && /err-disabled/i.test(switchOutput)) return { level: 'err', text: 'La porta dello switch risulta err-disabled: intervento manuale richiesto (shut/no shut dopo aver rimosso la causa).' };
   const lastFail = authRecords.find(r => r.passed === false || (r.status || '').toLowerCase() === 'failed');
   if (lastFail) return { level: 'err', text: `Ultimo tentativo di autenticazione fallito: ${lastFail.failure_reason || 'motivo sconosciuto'}.` };
@@ -696,7 +704,8 @@ function renderDiagnosis(mac, { sessions, authRecords, endpointCtx, switchOutput
   html += '<div class="section-title">Sessione ISE</div>';
   html += sessions.length ? kvCard([
     ['Utente', sessions[0].user_name], ['Stato', sessions[0].session_status],
-    ['NAS', sessions[0].nas_ip_address], ['Porta', sessions[0].nas_port_id], ['ACS server', sessions[0].acs_server],
+    ['NAS', sessions[0].nas_ip_address], ['Porta switch', sessions[0].nas_port_id], ['Policy Server', policyServerOf(sessions[0])],
+    ['Policy autenticazione', policyOf(sessions[0]).authn], ['Policy autorizzazione', policyOf(sessions[0]).authz],
   ]) : '<div class="empty">Nessuna sessione attiva.</div>';
 
   html += '<div class="section-title">Storico autenticazioni (24h)</div>';
@@ -745,7 +754,7 @@ function exportDiagnosis() {
   md += `## Verdetto\n${verdict.text}\n\n`;
   md += `## Sessione ISE\n`;
   md += sessions.length
-    ? `- Utente: ${s.user_name || '-'}\n- Stato: ${s.session_status || '-'}\n- NAS: ${s.nas_ip_address || '-'}\n- Porta: ${s.nas_port_id || '-'}\n- ACS server: ${s.acs_server || '-'}\n\n`
+    ? `- Utente: ${s.user_name || '-'}\n- Stato: ${s.session_status || '-'}\n- NAS: ${s.nas_ip_address || '-'}\n- Porta switch: ${s.nas_port_id || '-'}\n- Policy Server: ${policyServerOf(s)}\n- Policy autenticazione: ${policyOf(s).authn}\n- Policy autorizzazione: ${policyOf(s).authz}\n\n`
     : 'Nessuna sessione attiva.\n\n';
   md += `## Storico autenticazioni (24h)\n`;
   md += authRecords.length
