@@ -9,6 +9,8 @@ Endpoints verified against Cisco DevNet docs and community threads:
 - CoA/Disconnect           : community-reported format only, not in official docs -
                               behavior has been reported to vary between ISE patch levels.
 """
+import asyncio
+import re
 import xml.etree.ElementTree as ET
 
 import httpx
@@ -26,20 +28,54 @@ def _flatten(elem: ET.Element) -> dict:
     return {child.tag: (_flatten(child) if len(child) else (child.text or "").strip()) for child in elem}
 
 
+# Tag che contengono un singolo record, per endpoint MNT (schemi Cisco DevNet):
+#   Session/MACAddress|UserName|IPAddress -> sessionParameters (è la radice stessa)
+#   Session/ActiveList                    -> activeList > activeSession
+#   AuthStatus/MACAddress                 -> authStatusOutputList > authStatusList > authStatusElements
+#   AcctStatus/MACAddress                 -> acctStatusList > acctStatusElements
+# AuthStatus/AcctStatus annidano su tre livelli: fermarsi al primo figlio con
+# sotto-elementi restituirebbe un solo record con i campi un livello troppo in
+# basso, perdendo per giunta tutti i record tranne l'ultimo (tag omonimi).
+_RECORD_TAGS = ("sessionParameters", "activeSession", "authStatusElements", "acctStatusElements")
+
+# Blob "key=value,key=value" di other_attributes. Il valore può contenere virgole
+# e '=' (es. url-redirect), quindi si spezza solo prima di una chiave riconoscibile.
+_OTHER_ATTR_KEY = re.compile(r"(?:^|,)\s*([A-Za-z0-9_.\-]+)=")
+
+
+def _parse_other_attributes(blob: str) -> dict:
+    """ISE impacchetta qui i nomi delle regole applicate (AuthorizationPolicyMatchedRule,
+    IdentityPolicyMatchedRule, ISEPolicySetName...) quando non li emette come tag XML."""
+    matches = list(_OTHER_ATTR_KEY.finditer(blob))
+    out = {}
+    for i, m in enumerate(matches):
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(blob)
+        out[m.group(1)] = blob[m.end():end].strip()
+    return out
+
+
+def _enrich(record: dict) -> dict:
+    blob = record.get("other_attributes")
+    if isinstance(blob, str) and "=" in blob:
+        record["other_attributes_parsed"] = _parse_other_attributes(blob)
+    return record
+
+
 def _parse_records(xml_text: str) -> list[dict]:
     """Flatten ISE MNT XML into a list of dicts, tolerant of the exact wrapper tag."""
     try:
         root = ET.fromstring(xml_text)
     except ET.ParseError:
         return []
-    records = [_flatten(e) for e in root.iter("sessionParameters")]
-    if records:
-        return records
+    for tag in _RECORD_TAGS:
+        records = [_flatten(e) for e in root.iter(tag)]
+        if records:
+            return [_enrich(r) for r in records]
     children_with_subelements = [c for c in root if len(c)]
     if children_with_subelements:
-        return [_flatten(c) for c in children_with_subelements]
+        return [_enrich(_flatten(c)) for c in children_with_subelements]
     if len(root):
-        return [_flatten(root)]
+        return [_enrich(_flatten(root))]
     return []
 
 
@@ -168,6 +204,76 @@ async def get_license_status(host: str, username: str, password: str, verify_ssl
         except Exception as e:
             result[key] = {"error": str(e)}
     return result
+
+
+POLICY_STACKS = ("network-access", "device-admin")
+
+
+def _normalize_rule(item: dict) -> dict:
+    """Una regola OpenAPI: lo stato sta in rule.state, non nel livello esterno.
+
+    'profile' è una lista per network-access e una stringa per device-admin.
+    """
+    rule = item.get("rule") or {}
+    profile = item.get("profile")
+    if isinstance(profile, str):
+        profile = [profile]
+    return {
+        "id": rule.get("id"),
+        "name": rule.get("name"),
+        "state": rule.get("state"),
+        "rank": rule.get("rank"),
+        "default": rule.get("default"),
+        "profiles": profile or [],
+        "security_group": item.get("securityGroup"),
+        "identity_source": item.get("identitySourceName"),
+    }
+
+
+async def get_policy_catalog(
+    host: str, username: str, password: str, stack: str = "network-access",
+    verify_ssl: bool = False, port: int | None = None,
+) -> dict:
+    """Configurazione dei policy set e delle relative regole via Open API.
+
+    Restituisce SOLO la configurazione corrente: non dice nulla su cosa sia stato
+    applicato a una sessione passata, né sull'esito di un'autenticazione. Lo stato
+    'enabled' di una regola significa che la regola è attiva in configurazione.
+    """
+    if stack not in POLICY_STACKS:
+        raise ValueError(f"stack non valido: {stack}")
+
+    resp = await _openapi_get(host, username, password, f"policy/{stack}/policy-set", verify_ssl, port)
+    resp.raise_for_status()
+    policy_sets = resp.json().get("response", [])
+
+    # Un policy set = 2 chiamate. Concorrenza limitata per non sommergere il PAN.
+    gate = asyncio.Semaphore(5)
+
+    async def rules(ps_id: str, kind: str) -> tuple[list[dict] | None, str | None]:
+        async with gate:
+            try:
+                r = await _openapi_get(host, username, password, f"policy/{stack}/policy-set/{ps_id}/{kind}", verify_ssl, port)
+                r.raise_for_status()
+                return [_normalize_rule(i) for i in r.json().get("response", [])], None
+            except Exception as e:
+                return None, str(e)
+
+    results = await asyncio.gather(*[
+        rules(ps.get("id"), kind) for ps in policy_sets for kind in ("authentication", "authorization")
+    ])
+
+    out = []
+    for i, ps in enumerate(policy_sets):
+        (authn, authn_err), (authz, authz_err) = results[2 * i], results[2 * i + 1]
+        out.append({
+            "id": ps.get("id"), "name": ps.get("name"), "state": ps.get("state"),
+            "rank": ps.get("rank"), "default": ps.get("default"), "description": ps.get("description"),
+            "service_name": ps.get("serviceName"),
+            "authentication": authn, "authentication_error": authn_err,
+            "authorization": authz, "authorization_error": authz_err,
+        })
+    return {"stack": stack, "policy_sets": out}
 
 
 async def _ers_get(host: str, username: str, password: str, path: str, verify_ssl: bool, port: int | None = None, timeout: float = 15.0) -> httpx.Response:

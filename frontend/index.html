@@ -38,6 +38,12 @@
   .status-dot.ok { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
   .status-dot.err { background: var(--err); box-shadow: 0 0 6px var(--err); }
   .status-dot.unknown { background: var(--text-dim); }
+  .na { color: var(--text-dim); font-style: italic; }
+  .catalog-status { font-size: 11px; color: var(--text-dim); }
+  .badge.cfg { background: #14222e; color: var(--text-dim); font-weight: 500; margin-left: 6px; }
+  .badge.cfg.enabled { color: var(--ok); }
+  .badge.cfg.disabled { color: var(--warn); }
+  .badge.cfg.missing, .badge.cfg.ambiguous { color: var(--warn); }
   .status { font-size: 12px; color: var(--text-dim); margin-left: auto; display: flex; gap: 18px; }
 
   .layout { flex: 1; display: grid; grid-template-columns: 300px 1fr; overflow: hidden; }
@@ -248,6 +254,8 @@
 
       <div class="results-header">
         <h3>Sessioni</h3>
+        <span id="ll-catalog-status" class="catalog-status">Catalogo policy non caricato</span>
+        <button class="secondary small" onclick="loadPolicyCatalog(true)">Ricarica catalogo policy</button>
         <button class="secondary small" onclick="exportCsv()">Esporta CSV</button>
       </div>
       <div id="ll-results"><div class="empty">Nessuna ricerca eseguita.</div></div>
@@ -536,6 +544,9 @@ async function searchLiveLog() {
     $('ise-dot').className = 'dot ok';
     lastSessions = sessions;
     renderSessions(sessions);
+    // Una sola volta per host, in parallelo: non blocca la tabella e non viene
+    // rifatta a ogni auto-refresh né per riga.
+    loadPolicyCatalog(false);
     sessions.forEach(s => addToWatchlist(macOf(s), s.user_name));
     if (mode === 'mac' && value) { loadAuthStatus(value); loadEndpointContext(value); }
     else if (mode === 'user' && sessions.length && sessions[0].calling_station_id) {
@@ -550,34 +561,159 @@ async function searchLiveLog() {
   }
 }
 
-// Campi confermati da Cisco (docs DevNet, schema "restsdStatus" per ricerca per
-// MAC/utente): identity_policy_matched_rule = policy di autenticazione,
-// authorization_policy = policy di autorizzazione. Le altre varianti restano come
-// fallback per schemi/versioni meno comuni. Nota: la ricerca "Tutte le sessioni
-// attive" usa lo schema ridotto "simpleActiveSession" (solo user_name,
-// calling_station_id, nas_ip_address, acct_session_id, audit_session_id, server) e
-// NON include mai questi campi: per quella modalità restano '-' per limite dell'API.
+// I nomi delle regole applicate all'evento arrivano da due posti, entrambi
+// documentati da Cisco per lo schema fullRESTAuthStatus/restsdStatus:
+//  1. tag XML dedicati (identity_policy_matched_rule, authorization_policy)
+//  2. il blob other_attributes, dove ISE nella pratica scrive
+//     IdentityPolicyMatchedRule / AuthorizationPolicyMatchedRule / ISEPolicySetName
+//     anche quando i tag dedicati non vengono emessi (il backend lo espande in
+//     other_attributes_parsed).
+// La ricerca "Tutte le sessioni attive" usa lo schema ridotto simpleActiveSession,
+// che non contiene nessuno dei due: lì il dato è assente, non "nessuna policy".
+const NOT_AVAILABLE = null;
+
+function otherAttrs(s) { return s.other_attributes_parsed || {}; }
+
+function firstValue(...candidates) {
+  const v = candidates.find(c => typeof c === 'string' && c.trim() !== '');
+  return v === undefined ? NOT_AVAILABLE : v.trim();
+}
+
 function policyOf(s) {
-  const authn = s.identity_policy_matched_rule || s.authen_rule || s.authentication_policy_matched_rule
-    || s.authenticationPolicyMatched || s.authentication_rule || s.selected_authentication_identity_stores || '-';
-  const authz = s.authorization_policy || s.az_rule || s.authorization_policy_matched_rule
-    || s.authorizationPolicyMatched || s.authorization_rule || s.authorization_profile || '-';
-  return { authn, authz };
+  const oa = otherAttrs(s);
+  return {
+    policySet: firstValue(oa.ISEPolicySetName, s.policy_set_name),
+    authn: firstValue(s.identity_policy_matched_rule, oa.IdentityPolicyMatchedRule),
+    authz: firstValue(s.authorization_policy, oa.AuthorizationPolicyMatchedRule),
+    serviceSelection: firstValue(s.service_selection_policy, oa.ServiceSelectionMatchedRule),
+  };
 }
 
 // server = nome campo nello schema ridotto "simpleActiveSession" (ricerca "Tutte le
 // sessioni attive"); acs_server = nome campo nello schema completo (ricerca per MAC/utente).
 function policyServerOf(s) { return s.acs_server || s.server || '-'; }
 
-// Cisco non documenta un campo XML separato per il "profilo" di autorizzazione
-// effettivamente applicato (distinto dalla policy/regola): nello schema restsdStatus
-// il nome della policy autorizzativa (authorization_policy) è l'unico campo confermato.
-// Si prova comunque un elenco di nomi candidati noti da altre integrazioni ISE (pxGrid/
-// Live Log), con dacl/vlan come indicatori indiretti se il nome profilo non c'è.
-function profileOf(s) {
-  return s.az_profile || s.authorization_profile || s.selected_authorization_profiles
-    || s.authorizationProfile || s.profile_name
-    || (s.dacl || s.vlan ? `dACL: ${s.dacl || '-'} / VLAN: ${s.vlan || '-'}` : '-');
+// selected_azn_profiles è il campo Cisco confermato per i profili di autorizzazione
+// restituiti (presente anche nel set base di restAuthStatus). dacl/vlan NON sono il
+// profilo: restano un'informazione separata, non un ripiego che ne prende il posto.
+function profilesOf(s) {
+  const raw = firstValue(s.selected_azn_profiles, s.sel_exp_azn_profiles, otherAttrs(s).SelectedAuthorizationProfiles);
+  return raw === NOT_AVAILABLE ? NOT_AVAILABLE : raw.split(',').map(p => p.trim()).filter(Boolean);
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+}
+
+// ---- Catalogo policy (Open API) ----
+// Contiene SOLO la configurazione corrente dei policy set: serve a dire se una
+// regola citata da un evento esiste ancora e se è abilitata in configurazione.
+// Non dice nulla sull'esito dell'autenticazione né su cosa fosse configurato al
+// momento di un evento passato. Caricato una volta per host, mai per riga.
+let policyCatalog = { state: 'idle', host: null, index: null, error: null };
+
+function indexCatalog(catalog) {
+  const index = { set: new Map(), authn: new Map(), authz: new Map() };
+  for (const ps of catalog.policy_sets || []) {
+    if (ps.name) {
+      const k = ps.name.toLowerCase();
+      if (!index.set.has(k)) index.set.set(k, []);
+      index.set.get(k).push({ name: ps.name, state: ps.state, policySet: ps.name });
+    }
+    const add = (kind, rules) => {
+      for (const r of rules || []) {
+        if (!r.name) continue;
+        const key = r.name.toLowerCase();
+        if (!index[kind].has(key)) index[kind].set(key, []);
+        index[kind].get(key).push({ ...r, policySet: ps.name, policySetState: ps.state });
+      }
+    };
+    add('authn', ps.authentication);
+    add('authz', ps.authorization);
+  }
+  return index;
+}
+
+function renderCatalogStatus() {
+  const el = $('ll-catalog-status');
+  const msg = {
+    idle: 'Catalogo policy non caricato',
+    loading: 'Caricamento catalogo policy...',
+    ready: 'Catalogo policy caricato',
+    error: 'Catalogo policy non disponibile: ' + (policyCatalog.error || ''),
+  }[policyCatalog.state];
+  el.textContent = msg;
+  el.className = 'catalog-status' + (policyCatalog.state === 'error' ? ' err-msg' : '');
+}
+
+async function loadPolicyCatalog(force) {
+  const host = $('ise-host').value.trim();
+  if (!host) return;
+  if (!force && policyCatalog.host === host && ['ready', 'loading'].includes(policyCatalog.state)) return;
+  policyCatalog = { state: 'loading', host, index: null, error: null };
+  renderCatalogStatus();
+  try {
+    const catalog = await postJson('/api/ise/policy/catalog', { ...iseCreds(), stack: 'network-access' });
+    policyCatalog = { state: 'ready', host, index: indexCatalog(catalog), error: null };
+  } catch (e) {
+    // L'Open API può essere disabilitata: il Live Log resta utilizzabile con i
+    // soli dati dell'evento, senza inventare uno stato di configurazione.
+    policyCatalog = { state: 'error', host, index: null, error: e.message };
+  }
+  renderCatalogStatus();
+  if (lastSessions.length) renderSessions(lastSessions);
+  if (lastAuthStatusRecords.length) renderAuthStatus();
+}
+
+// Correlazione per nome: è l'unico identificativo che gli eventi MNT espongono
+// (non c'è un rule id). Il policy set dell'evento, quando presente, disambigua
+// i nomi ripetuti in più policy set.
+function configuredRule(kind, name, policySetName) {
+  if (policyCatalog.state !== 'ready' || name === NOT_AVAILABLE) return null;
+  let hits = policyCatalog.index[kind].get(name.toLowerCase()) || [];
+  if (policySetName) {
+    const inSet = hits.filter(h => (h.policySet || '').toLowerCase() === policySetName.toLowerCase());
+    if (inSet.length) hits = inSet;
+  }
+  if (!hits.length) return { status: 'missing' };
+  if (hits.length > 1) return { status: 'ambiguous', count: hits.length };
+  return { status: 'found', rule: hits[0] };
+}
+
+function configBadge(kind, name, policySetName) {
+  const match = configuredRule(kind, name, policySetName);
+  if (!match) return '';
+  if (match.status === 'missing') {
+    return ` <span class="badge cfg missing" title="Nessuna regola con questo nome nella configurazione attuale (la regola può essere stata rinominata o rimossa dopo l'evento)">assente in config</span>`;
+  }
+  if (match.status === 'ambiguous') {
+    return ` <span class="badge cfg ambiguous" title="${match.count} regole con lo stesso nome in policy set diversi: impossibile stabilire quale sia quella dell'evento">nome ambiguo</span>`;
+  }
+  const st = match.rule.state || 'sconosciuto';
+  return ` <span class="badge cfg ${esc(st)}" title="Stato attuale in configurazione della regola omonima nel policy set &quot;${esc(match.rule.policySet || '-')}&quot;. Non indica l'esito di questa autenticazione.">config: ${esc(st)}</span>`;
+}
+
+// Valore proveniente dall'evento; NOT_AVAILABLE = campo non restituito dall'API,
+// che è cosa diversa da "nessuna policy" o "negato".
+function ruleCell(name, kind, policySetName) {
+  if (name === NOT_AVAILABLE) {
+    return `<td><span class="na" title="Campo non restituito da questo endpoint ISE per questa sessione">n/d</span></td>`;
+  }
+  return `<td>${esc(name)}${configBadge(kind, name, policySetName)}</td>`;
+}
+
+function ruleText(v) { return v === NOT_AVAILABLE ? 'n/d (non restituito dall\'API)' : v; }
+function profilesText(s) {
+  const p = profilesOf(s);
+  return p === NOT_AVAILABLE ? 'n/d (non restituito dall\'API)' : p.join(', ');
+}
+
+function profilesCell(s) {
+  const profiles = profilesOf(s);
+  if (profiles === NOT_AVAILABLE) {
+    return `<td><span class="na" title="Campo selected_azn_profiles non restituito per questa sessione">n/d</span></td>`;
+  }
+  return `<td>${profiles.map(esc).join(', ')}</td>`;
 }
 
 // L'XML MNT viene appiattito in stringhe, quindi passed/failed arrivano come
@@ -611,14 +747,19 @@ function renderSessions(sessions) {
     return `<td>${v}</td>`;
   };
   let html = '<table><thead><tr><th>tipo connessione</th>' + colsBefore.map(th).join('') + '<th>esito</th>' + colsAfter.map(th).join('')
-    + '<th>Policy Server</th><th>Policy autenticazione</th><th>Policy autorizzazione</th><th>Profilo autorizzazione</th><th>Azioni</th></tr></thead><tbody>';
+    + '<th>Policy Server</th><th>Policy set</th><th>Regola autenticazione</th><th>Regola autorizzazione</th><th>Profili autorizzazione</th><th>Azioni</th></tr></thead><tbody>';
   sessions.forEach((s, i) => {
     const p = policyOf(s);
     const outcome = sessionOutcome(s);
     const dot = `<td><span class="status-dot ${outcome}" title="${OUTCOME_LABEL[outcome]}"></span></td>`;
     const wifi = isWireless(s);
     html += `<tr><td>${wifi === null ? 'N/D' : (wifi ? 'Wireless' : 'Wired')}</td>` + colsBefore.map(c => td(s, c)).join('') + dot + colsAfter.map(c => td(s, c)).join('')
-      + `<td>${policyServerOf(s)}</td><td>${p.authn}</td><td>${p.authz}</td><td>${profileOf(s)}</td><td class="actions-cell">
+      + `<td>${policyServerOf(s)}</td>`
+      + ruleCell(p.policySet, 'set', null)
+      + ruleCell(p.authn, 'authn', p.policySet)
+      + ruleCell(p.authz, 'authz', p.policySet)
+      + profilesCell(s)
+      + `<td class="actions-cell">
         <button class="secondary small" onclick="gotoSwitchAt(${i})">Switch</button>
         <button class="secondary small" onclick="reauthAt(${i})">Riautentica</button>
         <button class="danger small" onclick="disconnectAt(${i})">Disconnetti</button>
@@ -709,11 +850,17 @@ function renderAuthStatus() {
   const filter = $('ll-authstatus-filter').value;
   const records = filter ? lastAuthStatusRecords.filter(rec => authStatusOf(rec) === filter) : lastAuthStatusRecords;
   if (!records.length) { box.innerHTML = '<div class="empty">Nessun tentativo di autenticazione corrispondente.</div>'; return; }
-  let html = '<table><thead><tr><th>Timestamp</th><th>Esito</th><th>Utente</th><th>Policy autenticazione</th><th>Policy autorizzazione</th><th>Motivo fallimento</th></tr></thead><tbody>';
+  let html = '<table><thead><tr><th>Timestamp</th><th>Esito</th><th>Utente</th><th>Policy set</th><th>Regola autenticazione</th><th>Regola autorizzazione</th><th>Profili autorizzazione</th><th>Motivo fallimento</th></tr></thead><tbody>';
   for (const rec of records) {
     const status = authStatusOf(rec);
     const p = policyOf(rec);
-    html += `<tr><td>${rec.acs_timestamp || rec.timestamp || '-'}</td><td><span class="badge ${status}">${status || '-'}</span></td><td>${rec.user_name || '-'}</td><td>${p.authn}</td><td>${p.authz}</td><td>${rec.failure_reason || '-'}</td></tr>`;
+    html += `<tr><td>${esc(rec.acs_timestamp || rec.timestamp || '-')}</td>`
+      + `<td><span class="badge ${status}">${status || 'n/d'}</span></td><td>${esc(rec.user_name || '-')}</td>`
+      + ruleCell(p.policySet, 'set', null)
+      + ruleCell(p.authn, 'authn', p.policySet)
+      + ruleCell(p.authz, 'authz', p.policySet)
+      + profilesCell(rec)
+      + `<td>${esc(rec.failure_reason || '-')}</td></tr>`;
   }
   html += '</tbody></table>';
   box.innerHTML = html;
@@ -878,14 +1025,16 @@ function renderDiagnosis(mac, { sessions, authRecords, endpointCtx, switchOutput
     ['Utente', sessions[0].user_name], ['Esito', OUTCOME_LABEL[sessionOutcome(sessions[0])]],
     ['Tipo connessione', isWireless(sessions[0]) === null ? 'N/D' : (isWireless(sessions[0]) ? 'Wireless' : 'Wired')],
     ['NAS', sessions[0].nas_ip_address], ['Porta switch', sessions[0].nas_port_id], ['Policy Server', policyServerOf(sessions[0])],
-    ['Policy autenticazione', policyOf(sessions[0]).authn], ['Policy autorizzazione', policyOf(sessions[0]).authz],
-    ['Profilo autorizzazione', profileOf(sessions[0])],
+    ['Policy set', ruleText(policyOf(sessions[0]).policySet)],
+    ['Regola autenticazione', ruleText(policyOf(sessions[0]).authn)],
+    ['Regola autorizzazione', ruleText(policyOf(sessions[0]).authz)],
+    ['Profili autorizzazione', profilesText(sessions[0])],
   ]) : '<div class="empty">Nessuna sessione attiva.</div>';
 
   html += '<div class="section-title">Storico autenticazioni (24h)</div>';
   html += authRecords.length ? kvCard(authRecords.slice(0, 5).map(r => {
     const p = policyOf(r);
-    return [r.acs_timestamp || r.timestamp || '-', `${r.failure_reason || 'passed'} — Authn: ${p.authn} / Authz: ${p.authz}`];
+    return [r.acs_timestamp || r.timestamp || '-', `${authStatusOf(r) || 'n/d'}${r.failure_reason ? ' — ' + r.failure_reason : ''} — Authn: ${ruleText(p.authn)} / Authz: ${ruleText(p.authz)}`];
   })) : '<div class="empty">Nessun tentativo registrato.</div>';
 
   html += '<div class="section-title">Contesto endpoint (ERS)</div>';
@@ -938,13 +1087,13 @@ function exportDiagnosis() {
   md += `## Verdetto\n${verdict.text}\n\n`;
   md += `## Sessione ISE\n`;
   md += sessions.length
-    ? `- Utente: ${s.user_name || '-'}\n- Esito: ${OUTCOME_LABEL[sessionOutcome(s)]}\n- Tipo connessione: ${isWireless(s) === null ? 'N/D' : (isWireless(s) ? 'Wireless' : 'Wired')}\n- NAS: ${s.nas_ip_address || '-'}\n- Porta switch: ${s.nas_port_id || '-'}\n- Policy Server: ${policyServerOf(s)}\n- Policy autenticazione: ${policyOf(s).authn}\n- Policy autorizzazione: ${policyOf(s).authz}\n- Profilo autorizzazione: ${profileOf(s)}\n\n`
+    ? `- Utente: ${s.user_name || '-'}\n- Esito: ${OUTCOME_LABEL[sessionOutcome(s)]}\n- Tipo connessione: ${isWireless(s) === null ? 'N/D' : (isWireless(s) ? 'Wireless' : 'Wired')}\n- NAS: ${s.nas_ip_address || '-'}\n- Porta switch: ${s.nas_port_id || '-'}\n- Policy Server: ${policyServerOf(s)}\n- Policy set: ${ruleText(policyOf(s).policySet)}\n- Regola autenticazione: ${ruleText(policyOf(s).authn)}\n- Regola autorizzazione: ${ruleText(policyOf(s).authz)}\n- Profili autorizzazione: ${profilesText(s)}\n\n`
     : 'Nessuna sessione attiva.\n\n';
   md += `## Storico autenticazioni (24h)\n`;
   md += authRecords.length
     ? authRecords.slice(0, 5).map(r => {
         const p = policyOf(r);
-        return `- ${r.acs_timestamp || r.timestamp || '-'}: ${r.failure_reason || 'passed'} — Authn: ${p.authn} / Authz: ${p.authz}`;
+        return `- ${r.acs_timestamp || r.timestamp || '-'}: ${authStatusOf(r) || 'n/d'}${r.failure_reason ? ' — ' + r.failure_reason : ''} — Authn: ${ruleText(p.authn)} / Authz: ${ruleText(p.authz)}`;
       }).join('\n') + '\n\n'
     : 'Nessun tentativo registrato.\n\n';
   md += `## Contesto endpoint (ERS)\n`;
@@ -1138,7 +1287,7 @@ function renderAuthTable() {
   if (!rows.length && !errors.length) { box.innerHTML = '<div class="empty">Nessun risultato per i filtri correnti.</div>'; return; }
 
   let html = errors.map(e => `<div class="err-msg">${e._mac}: ${e._error}</div>`).join('');
-  html += '<table><thead><tr><th>Timestamp</th><th>MAC</th><th>Esito</th><th>Utente</th><th>NAS</th><th>Policy autenticazione</th><th>Policy autorizzazione</th><th>Motivo fallimento</th><th>CoA correlato</th></tr></thead><tbody>';
+  html += '<table><thead><tr><th>Timestamp</th><th>MAC</th><th>Esito</th><th>Utente</th><th>NAS</th><th>Policy set</th><th>Regola autenticazione</th><th>Regola autorizzazione</th><th>Motivo fallimento</th><th>CoA correlato</th></tr></thead><tbody>';
   for (const r of rows) {
     const ts = r.acs_timestamp || r.timestamp || '-';
     const status = authStatusOf(r);
@@ -1147,7 +1296,12 @@ function renderAuthTable() {
     const coaCell = markers.length
       ? markers.map(m => `<span class="badge passed" title="${new Date(m.ts).toLocaleString()} - ${m.result}">${m.action}</span>`).join(' ')
       : '-';
-    html += `<tr><td>${ts}</td><td>${r._mac}</td><td><span class="badge ${status}">${status || '-'}</span></td><td>${r.user_name || '-'}</td><td>${r.nas_ip_address || '-'}</td><td>${p.authn}</td><td>${p.authz}</td><td>${r.failure_reason || '-'}</td><td>${coaCell}</td></tr>`;
+    html += `<tr><td>${esc(ts)}</td><td>${esc(r._mac)}</td><td><span class="badge ${status}">${status || 'n/d'}</span></td>`
+      + `<td>${esc(r.user_name || '-')}</td><td>${esc(r.nas_ip_address || '-')}</td>`
+      + ruleCell(p.policySet, 'set', null)
+      + ruleCell(p.authn, 'authn', p.policySet)
+      + ruleCell(p.authz, 'authz', p.policySet)
+      + `<td>${esc(r.failure_reason || '-')}</td><td>${coaCell}</td></tr>`;
   }
   html += '</tbody></table>';
   box.innerHTML = html;

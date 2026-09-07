@@ -43,6 +43,10 @@ class EndpointContextQuery(IseCreds):
     mac: str
 
 
+class PolicyCatalogQuery(IseCreds):
+    stack: str = "network-access"
+
+
 class CoaReauthRequest(IseCreds):
     psn_name: str
     mac: str
@@ -115,6 +119,17 @@ async def auth_status(q: AuthStatusQuery):
 async def endpoint_context(q: EndpointContextQuery):
     try:
         return await ise_client.get_endpoint_context(q.host, q.username, q.password, q.mac, q.verify_ssl, q.port)
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/ise/policy/catalog")
+async def policy_catalog(q: PolicyCatalogQuery):
+    """Configurazione dei policy set (Open API). Nessun dato di sessione qui."""
+    try:
+        return await ise_client.get_policy_catalog(q.host, q.username, q.password, q.stack, q.verify_ssl, q.port)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
     except Exception as e:
         raise HTTPException(400, str(e))
 
