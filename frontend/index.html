@@ -37,6 +37,7 @@
   .status-dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
   .status-dot.ok { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
   .status-dot.err { background: var(--err); box-shadow: 0 0 6px var(--err); }
+  .status-dot.unknown { background: var(--text-dim); }
   .status { font-size: 12px; color: var(--text-dim); margin-left: auto; display: flex; gap: 18px; }
 
   .layout { flex: 1; display: grid; grid-template-columns: 300px 1fr; overflow: hidden; }
@@ -127,6 +128,7 @@
   <div class="status">
     <span><span id="ise-dot" class="dot"></span>ISE</span>
     <span><span id="sw-dot" class="dot"></span>Switch</span>
+    <span><span id="wlc-dot" class="dot"></span>WLC</span>
   </div>
 </header>
 
@@ -155,7 +157,7 @@
     </div>
 
     <div class="card">
-      <h2>Connessione Switch / WLC</h2>
+      <h2>Connessione Switch</h2>
       <label>Host / IP</label>
       <input type="text" id="sw-host" placeholder="10.0.0.1">
       <div class="row">
@@ -171,13 +173,6 @@
         <option value="cisco_ios">cisco_ios</option>
         <option value="cisco_xe">cisco_xe</option>
         <option value="cisco_nxos">cisco_nxos</option>
-        <option value="cisco_wlc">cisco_wlc (WLC AireOS)</option>
-      </select>
-      <label>Piattaforma (per i quick command)</label>
-      <select id="sw-platform" onchange="onPlatformChange()">
-        <option value="switch">Switch (IOS/IOS-XE/NX-OS)</option>
-        <option value="wlc-aireos">WLC AireOS</option>
-        <option value="wlc-9800">WLC 9800 (IOS-XE)</option>
       </select>
       <label><input type="checkbox" id="sw-advanced"> Modalità avanzata (permette comandi diversi da "show")</label>
       <div class="profile-row">
@@ -186,12 +181,38 @@
         <button class="secondary small" onclick="deleteProfile('sw')">Elimina</button>
       </div>
     </div>
+
+    <div class="card">
+      <h2>Connessione WLC</h2>
+      <label>Host / IP</label>
+      <input type="text" id="wlc-host" placeholder="10.0.0.2">
+      <div class="row">
+        <div><label>Username</label><input type="text" id="wlc-user"></div>
+        <div><label>Porta</label><input type="number" id="wlc-port" value="22"></div>
+      </div>
+      <label>Password</label>
+      <input type="password" id="wlc-pass">
+      <label>Enable secret (opzionale)</label>
+      <input type="password" id="wlc-secret">
+      <label>Tipo WLC</label>
+      <select id="wlc-devtype">
+        <option value="cisco_wlc">AireOS</option>
+        <option value="cisco_xe">9800 (IOS-XE)</option>
+      </select>
+      <label><input type="checkbox" id="wlc-advanced"> Modalità avanzata (permette comandi diversi da "show")</label>
+      <div class="profile-row">
+        <select id="wlc-profile-select"></select>
+        <button class="secondary small" onclick="saveProfile('wlc')">Salva</button>
+        <button class="secondary small" onclick="deleteProfile('wlc')">Elimina</button>
+      </div>
+    </div>
   </aside>
 
   <main>
     <div class="tabs">
       <div class="tab active" data-tab="livelog" onclick="switchTab('livelog')">Live Log</div>
-      <div class="tab" data-tab="console" onclick="switchTab('console')">Console (Switch/WLC)</div>
+      <div class="tab" data-tab="console" onclick="switchTab('console')">Switch Console</div>
+      <div class="tab" data-tab="console-wlc" onclick="switchTab('console-wlc')">WLC Console</div>
       <div class="tab" data-tab="diag" onclick="switchTab('diag')">Diagnostica</div>
       <div class="tab" data-tab="auth" onclick="switchTab('auth')">Autenticazioni</div>
       <div class="tab" data-tab="license" onclick="switchTab('license')">Licenze</div>
@@ -251,15 +272,27 @@
     </div>
 
     <div id="tab-console" class="tab-panel">
-      <div class="quick-cmds" id="quick-cmds"></div>
+      <div class="quick-cmds" id="quick-cmds-sw"></div>
       <div class="row">
-        <input type="text" id="cmd-input" placeholder="show authentication sessions...">
-        <button onclick="runCommand()" style="flex:0 0 auto">Esegui</button>
+        <input type="text" id="cmd-input-sw" placeholder="show authentication sessions...">
+        <button onclick="runCommand('sw')" style="flex:0 0 auto">Esegui</button>
       </div>
       <div class="console-actions">
-        <button class="secondary small" onclick="copyConsoleOutput()">Copia output</button>
+        <button class="secondary small" onclick="copyConsoleOutput('sw')">Copia output</button>
       </div>
-      <div id="console-out" class="console">Pronto.</div>
+      <div id="console-out-sw" class="console">Pronto.</div>
+    </div>
+
+    <div id="tab-console-wlc" class="tab-panel">
+      <div class="quick-cmds" id="quick-cmds-wlc"></div>
+      <div class="row">
+        <input type="text" id="cmd-input-wlc" placeholder="show client summary...">
+        <button onclick="runCommand('wlc')" style="flex:0 0 auto">Esegui</button>
+      </div>
+      <div class="console-actions">
+        <button class="secondary small" onclick="copyConsoleOutput('wlc')">Copia output</button>
+      </div>
+      <div id="console-out-wlc" class="console">Pronto.</div>
     </div>
 
     <div id="tab-diag" class="tab-panel">
@@ -330,7 +363,7 @@
 const $ = id => document.getElementById(id);
 
 const JSON_HEADERS = {'Content-Type':'application/json'};
-const FIELDS = ['ise-host','ise-user','ise-pass','ise-verify','ise-port','ise-ers-port','sw-host','sw-user','sw-pass','sw-secret','sw-port','sw-devtype','sw-platform','sw-advanced'];
+const FIELDS = ['ise-host','ise-user','ise-pass','ise-verify','ise-port','ise-ers-port','sw-host','sw-user','sw-pass','sw-secret','sw-port','sw-devtype','sw-advanced','wlc-host','wlc-user','wlc-pass','wlc-secret','wlc-port','wlc-devtype','wlc-advanced'];
 FIELDS.forEach(id => {
   const el = $(id);
   const saved = sessionStorage.getItem(id);
@@ -375,6 +408,18 @@ function switchCreds() {
   };
 }
 
+function wlcCreds() {
+  return {
+    host: $('wlc-host').value, username: $('wlc-user').value, password: $('wlc-pass').value,
+    secret: $('wlc-secret').value, port: parseInt($('wlc-port').value || '22', 10), device_type: $('wlc-devtype').value,
+    advanced: $('wlc-advanced').checked
+  };
+}
+
+// target 'sw' o 'wlc' - console switch e WLC sono indipendenti, così possono
+// restare aperte in parallelo senza condividere host/credenziali/output.
+function credsFor(target) { return target === 'wlc' ? wlcCreds() : switchCreds(); }
+
 async function testIse() {
   const btn = $('ise-test-btn');
   btn.disabled = true; $('ise-test-msg').textContent = '';
@@ -390,8 +435,8 @@ async function testIse() {
 }
 
 // ---- Profiles (host/username only, never password) ----
-function profileKey(kind) { return kind === 'ise' ? 'ise-profiles' : 'sw-profiles'; }
-function profileFields(kind) { return kind === 'ise' ? ['ise-host','ise-user'] : ['sw-host','sw-user']; }
+function profileKey(kind) { return kind + '-profiles'; }
+function profileFields(kind) { return [kind + '-host', kind + '-user']; }
 
 function loadProfiles(kind) {
   try { return JSON.parse(localStorage.getItem(profileKey(kind)) || '[]'); } catch { return []; }
@@ -422,7 +467,7 @@ function deleteProfile(kind) {
   renderProfileSelect(kind);
 }
 
-['ise','sw'].forEach(kind => {
+['ise','sw','wlc'].forEach(kind => {
   renderProfileSelect(kind);
   $(kind + '-profile-select').addEventListener('change', () => {
     const sel = $(kind + '-profile-select');
@@ -535,10 +580,24 @@ function profileOf(s) {
     || (s.dacl || s.vlan ? `dACL: ${s.dacl || '-'} / VLAN: ${s.vlan || '-'}` : '-');
 }
 
-// Stessi stati "buoni" usati per il badge (.badge.AUTHENTICATED/.STARTED/.AUTHORIZED):
-// qualsiasi altro session_status (o assente) viene mostrato come pallino rosso.
+// L'XML MNT viene appiattito in stringhe, quindi passed/failed arrivano come
+// "true"/"false": valutarli come booleani darebbe sempre true ("false" è truthy).
+function isTrue(v) { return String(v).trim().toLowerCase() === 'true'; }
+
 const SESSION_OK_STATES = ['AUTHENTICATED', 'STARTED', 'AUTHORIZED'];
-function sessionOk(s) { return SESSION_OK_STATES.includes((s.session_status || '').toUpperCase()); }
+
+// passed/failed sono i campi ufficiali dell'esito nello schema restsdStatus;
+// session_status non esiste lì. Session/ActiveList non espone nessuno dei due,
+// quindi l'esito resta 'unknown' (pallino grigio) invece di fingere un rosso.
+function sessionOutcome(s) {
+  if (isTrue(s.passed)) return 'ok';
+  if (isTrue(s.failed)) return 'err';
+  const st = (s.session_status || '').toUpperCase();
+  if (!st) return 'unknown';
+  return SESSION_OK_STATES.includes(st) ? 'ok' : 'err';
+}
+
+const OUTCOME_LABEL = { ok: 'autenticazione riuscita', err: 'autenticazione fallita', unknown: 'esito non disponibile su questo endpoint ISE' };
 
 function renderSessions(sessions) {
   const box = $('ll-results');
@@ -555,8 +614,10 @@ function renderSessions(sessions) {
     + '<th>Policy Server</th><th>Policy autenticazione</th><th>Policy autorizzazione</th><th>Profilo autorizzazione</th><th>Azioni</th></tr></thead><tbody>';
   sessions.forEach((s, i) => {
     const p = policyOf(s);
-    const dot = `<td><span class="status-dot ${sessionOk(s) ? 'ok' : 'err'}" title="${s.session_status || 'sconosciuto'}"></span></td>`;
-    html += `<tr><td>${isWireless(s) ? 'Wireless' : 'Wired'}</td>` + colsBefore.map(c => td(s, c)).join('') + dot + colsAfter.map(c => td(s, c)).join('')
+    const outcome = sessionOutcome(s);
+    const dot = `<td><span class="status-dot ${outcome}" title="${OUTCOME_LABEL[outcome]}"></span></td>`;
+    const wifi = isWireless(s);
+    html += `<tr><td>${wifi === null ? 'N/D' : (wifi ? 'Wireless' : 'Wired')}</td>` + colsBefore.map(c => td(s, c)).join('') + dot + colsAfter.map(c => td(s, c)).join('')
       + `<td>${policyServerOf(s)}</td><td>${p.authn}</td><td>${p.authz}</td><td>${profileOf(s)}</td><td class="actions-cell">
         <button class="secondary small" onclick="gotoSwitchAt(${i})">Switch</button>
         <button class="secondary small" onclick="reauthAt(${i})">Riautentica</button>
@@ -574,24 +635,31 @@ function toast(msg, ok) {
 function macOf(session) { return session.calling_station_id || $('ll-value').value.trim(); }
 
 // Attributo RADIUS standard (NAS-Port-Type, #61): "Wireless - IEEE 802.11" per
-// sessioni originate da un WLC/AP. Su ISE il campo compare come nas_port_type.
-function isWireless(s) { return /wireless/i.test(s.nas_port_type || s.nas_port_type_name || ''); }
+// sessioni via WLC/AP, "Ethernet" per il cablato. Session/ActiveList usa uno
+// schema ridotto che non lo espone: lì torna null ("N/D"), perché assumere
+// "Wired" quando il campo manca è esattamente l'errore da evitare.
+function isWireless(s) {
+  const t = s.nas_port_type || s.nas_port_type_name || '';
+  if (/wireless|802\.11/i.test(t)) return true;
+  if (/ethernet/i.test(t)) return false;
+  if (/ssid=/i.test(s.cisco_av_pair || '')) return true;
+  return null;
+}
 
 function gotoSwitchAt(i) {
   const s = lastSessions[i];
-  if (s.nas_ip_address) { $('sw-host').value = s.nas_ip_address; $('sw-host').dispatchEvent(new Event('change')); }
-  switchTab('console');
   const mac = macOf(s);
-  if (isWireless(s)) {
-    // NAS IP qui è il WLC, non uno switch: il tab resta lo stesso ma i comandi e
-    // il device_type/piattaforma vanno adattati. Default AireOS - se il cliente
-    // usa un 9800 basta cambiare "Piattaforma" a sinistra (stesso host, altro CLI).
-    if ($('sw-platform').value === 'switch') { $('sw-platform').value = 'wlc-aireos'; onPlatformChange(); }
-    runCommands([`show client detail ${mac}`]);
+  // Su sessione wireless il NAS IP è il WLC, non uno switch: va sulla console WLC,
+  // che ha host/credenziali proprie e resta aperta in parallelo a quella switch.
+  const target = isWireless(s) === true ? 'wlc' : 'sw';
+  if (s.nas_ip_address) { $(target + '-host').value = s.nas_ip_address; $(target + '-host').dispatchEvent(new Event('change')); }
+  switchTab(target === 'wlc' ? 'console-wlc' : 'console');
+  if (target === 'wlc') {
+    runCommands([$('wlc-devtype').value === 'cisco_xe' ? `show wireless client mac-address ${mac} detail` : `show client detail ${mac}`], 'wlc');
   } else if (s.nas_port_id) {
-    runCommands([`show authentication sessions interface ${s.nas_port_id}`, `show interface ${s.nas_port_id} status`]);
+    runCommands([`show authentication sessions interface ${s.nas_port_id}`, `show interface ${s.nas_port_id} status`], 'sw');
   } else {
-    runCommands([`show authentication sessions mac ${mac}`]);
+    runCommands([`show authentication sessions mac ${mac}`], 'sw');
   }
 }
 
@@ -632,7 +700,8 @@ async function disconnectAt(i) {
 let lastAuthStatusRecords = [];
 
 function authStatusOf(rec) {
-  return (rec.passed !== undefined ? (rec.passed ? 'passed' : 'failed') : (rec.status || '')).toString().toLowerCase();
+  if (rec.passed !== undefined || rec.failed !== undefined) return isTrue(rec.passed) ? 'passed' : 'failed';
+  return (rec.status || '').toString().toLowerCase();
 }
 
 function renderAuthStatus() {
@@ -708,25 +777,24 @@ function exportCsv() {
   URL.revokeObjectURL(a.href);
 }
 
-// ---- Switch Console ----
+// ---- Console Switch / WLC (indipendenti) ----
 // Comandi show diversi per piattaforma: gli switch usano "show authentication
 // sessions" (802.1X/MAB sulla porta), gli AireOS WLC usano "show client",
-// i 9800 (IOS-XE) usano "show wireless client" - stessa CLI Netmiko IOS/IOS-XE
-// per la connessione, ma sintassi comandi diversa.
+// i 9800 (IOS-XE) usano "show wireless client".
 const QUICK_CMDS = {
-  switch: [
+  sw: [
     ['show authentication sessions', () => 'show authentication sessions'],
     ['sessions by MAC', () => 'show authentication sessions mac ' + lastMac()],
     ['mac address-table', () => 'show mac address-table address ' + lastMac()],
     ['sessions by interface', () => 'show authentication sessions interface '],
   ],
-  'wlc-aireos': [
+  cisco_wlc: [
     ['client detail', () => 'show client detail ' + lastMac()],
     ['client summary', () => 'show client summary'],
     ['client roam-history', () => 'show client roam-history ' + lastMac()],
     ['ap summary', () => 'show ap summary'],
   ],
-  'wlc-9800': [
+  cisco_xe: [
     ['wireless client detail', () => 'show wireless client mac-address ' + lastMac() + ' detail'],
     ['wireless client summary', () => 'show wireless client summary'],
     ['ap summary', () => 'show ap summary'],
@@ -734,58 +802,50 @@ const QUICK_CMDS = {
   ],
 };
 
-function renderQuickCmds() {
-  const platform = $('sw-platform').value;
-  const cmds = QUICK_CMDS[platform];
-  $('quick-cmds').innerHTML = cmds.map(([label]) => `<button class="secondary">${label}</button>`).join('');
-  $('quick-cmds').querySelectorAll('button').forEach((btn, i) => { btn.onclick = () => quickCmd(cmds[i][1]()); });
+function renderQuickCmds(target) {
+  const cmds = target === 'wlc' ? (QUICK_CMDS[$('wlc-devtype').value] || QUICK_CMDS.cisco_wlc) : QUICK_CMDS.sw;
+  const box = $('quick-cmds-' + target);
+  box.innerHTML = cmds.map(([label]) => `<button class="secondary">${label}</button>`).join('');
+  box.querySelectorAll('button').forEach((btn, i) => { btn.onclick = () => quickCmd(cmds[i][1](), target); });
 }
 
-function onPlatformChange() {
-  const platform = $('sw-platform').value;
-  const devtype = $('sw-devtype');
-  if (platform === 'wlc-aireos') devtype.value = 'cisco_wlc';
-  else if (platform === 'wlc-9800') devtype.value = 'cisco_xe';
-  else if (devtype.value === 'cisco_wlc') devtype.value = 'cisco_ios';
-  devtype.dispatchEvent(new Event('change'));
-  renderQuickCmds();
-}
+renderQuickCmds('sw');
+renderQuickCmds('wlc');
+$('wlc-devtype').addEventListener('change', () => renderQuickCmds('wlc'));
 
-renderQuickCmds();
+function quickCmd(cmd, target) { $('cmd-input-' + target).value = cmd; runCommand(target); }
 
-function quickCmd(cmd) { $('cmd-input').value = cmd; runCommand(); }
-
-async function execSwitchCommand(command) {
-  const body = { ...switchCreds(), command };
+async function execDeviceCommand(command, target) {
+  const body = { ...credsFor(target), command };
   const r = await fetch('/api/switch/exec', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(body) });
   const data = await r.json();
   if (!r.ok) throw new Error(data.detail || 'errore');
-  $('sw-dot').className = 'dot ok';
+  $(target + '-dot').className = 'dot ok';
   return data.output || '(output vuoto)';
 }
 
-async function runCommand() {
-  const command = $('cmd-input').value.trim();
+async function runCommand(target) {
+  const command = $('cmd-input-' + target).value.trim();
   if (!command) return;
-  runCommands([command]);
+  runCommands([command], target);
 }
 
-async function runCommands(commands) {
-  const out = $('console-out');
+async function runCommands(commands, target) {
+  const out = $('console-out-' + target);
   out.textContent = '';
   for (const command of commands) {
     out.textContent += `$ ${command}\n`;
     try {
-      out.textContent += (await execSwitchCommand(command)) + '\n\n';
+      out.textContent += (await execDeviceCommand(command, target)) + '\n\n';
     } catch (e) {
-      $('sw-dot').className = 'dot err';
+      $(target + '-dot').className = 'dot err';
       out.textContent += 'Errore: ' + e.message + '\n\n';
     }
   }
 }
 
-function copyConsoleOutput() {
-  navigator.clipboard.writeText($('console-out').textContent);
+function copyConsoleOutput(target) {
+  navigator.clipboard.writeText($('console-out-' + target).textContent);
 }
 
 // ---- Diagnostica completa ----
@@ -797,10 +857,10 @@ async function postJson(url, body) {
 }
 
 function computeVerdict(sessions, authRecords, endpointCtx, switchOutput) {
-  const active = sessions.find(s => (s.session_status || '').toUpperCase() === 'AUTHENTICATED');
+  const active = sessions.find(s => sessionOutcome(s) === 'ok');
   if (active) return { level: 'ok', text: `Sessione attiva e autenticata su ${policyServerOf(active) !== '-' ? policyServerOf(active) : 'ISE'} (porta ${active.nas_port_id || '?'}).` };
   if (switchOutput && /err-disabled/i.test(switchOutput)) return { level: 'err', text: 'La porta dello switch risulta err-disabled: intervento manuale richiesto (shut/no shut dopo aver rimosso la causa).' };
-  const lastFail = authRecords.find(r => r.passed === false || (r.status || '').toLowerCase() === 'failed');
+  const lastFail = authRecords.find(r => authStatusOf(r) === 'failed');
   if (lastFail) return { level: 'err', text: `Ultimo tentativo di autenticazione fallito: ${lastFail.failure_reason || 'motivo sconosciuto'}.` };
   if (!sessions.length && !authRecords.length) return { level: 'warn', text: 'Nessuna traccia della MAC in ISE (né sessione né tentativi di autenticazione nelle ultime 24h). Verificare che la porta sia collegata e configurata per 802.1X/MAB.' };
   return { level: 'warn', text: 'Nessuna sessione attiva al momento, ma sono presenti tracce storiche. Vedere i dettagli sotto.' };
@@ -815,7 +875,8 @@ function renderDiagnosis(mac, { sessions, authRecords, endpointCtx, switchOutput
 
   html += '<div class="section-title">Sessione ISE</div>';
   html += sessions.length ? kvCard([
-    ['Utente', sessions[0].user_name], ['Stato', sessions[0].session_status],
+    ['Utente', sessions[0].user_name], ['Esito', OUTCOME_LABEL[sessionOutcome(sessions[0])]],
+    ['Tipo connessione', isWireless(sessions[0]) === null ? 'N/D' : (isWireless(sessions[0]) ? 'Wireless' : 'Wired')],
     ['NAS', sessions[0].nas_ip_address], ['Porta switch', sessions[0].nas_port_id], ['Policy Server', policyServerOf(sessions[0])],
     ['Policy autenticazione', policyOf(sessions[0]).authn], ['Policy autorizzazione', policyOf(sessions[0]).authz],
     ['Profilo autorizzazione', profileOf(sessions[0])],
@@ -852,10 +913,17 @@ async function runDiagnosis() {
   const authRecords = authRes.status === 'fulfilled' ? authRes.value : [];
   const endpointCtx = ctxRes.status === 'fulfilled' ? ctxRes.value : null;
 
+  // Sessione wireless -> il NAD è il WLC, non uno switch: si interroga la console WLC.
+  const wifi = sessions.length ? isWireless(sessions[0]) : null;
+  const target = wifi === true ? 'wlc' : 'sw';
+  const cmd = target === 'wlc'
+    ? ($('wlc-devtype').value === 'cisco_xe' ? `show wireless client mac-address ${mac} detail` : `show client detail ${mac}`)
+    : `show authentication sessions mac ${mac}`;
+
   let switchOutput = null, switchError = null;
-  if ($('sw-host').value) {
-    try { switchOutput = await execSwitchCommand(`show authentication sessions mac ${mac}`); }
-    catch (e) { switchError = 'Errore switch: ' + e.message; }
+  if ($(target + '-host').value) {
+    try { switchOutput = await execDeviceCommand(cmd, target); }
+    catch (e) { switchError = `Errore ${target === 'wlc' ? 'WLC' : 'switch'}: ` + e.message; }
   }
 
   renderDiagnosis(mac, { sessions, authRecords, endpointCtx, switchOutput, switchError });
@@ -870,7 +938,7 @@ function exportDiagnosis() {
   md += `## Verdetto\n${verdict.text}\n\n`;
   md += `## Sessione ISE\n`;
   md += sessions.length
-    ? `- Utente: ${s.user_name || '-'}\n- Stato: ${s.session_status || '-'}\n- NAS: ${s.nas_ip_address || '-'}\n- Porta switch: ${s.nas_port_id || '-'}\n- Policy Server: ${policyServerOf(s)}\n- Policy autenticazione: ${policyOf(s).authn}\n- Policy autorizzazione: ${policyOf(s).authz}\n- Profilo autorizzazione: ${profileOf(s)}\n\n`
+    ? `- Utente: ${s.user_name || '-'}\n- Esito: ${OUTCOME_LABEL[sessionOutcome(s)]}\n- Tipo connessione: ${isWireless(s) === null ? 'N/D' : (isWireless(s) ? 'Wireless' : 'Wired')}\n- NAS: ${s.nas_ip_address || '-'}\n- Porta switch: ${s.nas_port_id || '-'}\n- Policy Server: ${policyServerOf(s)}\n- Policy autenticazione: ${policyOf(s).authn}\n- Policy autorizzazione: ${policyOf(s).authz}\n- Profilo autorizzazione: ${profileOf(s)}\n\n`
     : 'Nessuna sessione attiva.\n\n';
   md += `## Storico autenticazioni (24h)\n`;
   md += authRecords.length
@@ -1060,7 +1128,7 @@ function renderAuthTable() {
 
   const errors = lastAuthRows.filter(r => r._error);
   let rows = lastAuthRows.filter(r => !r._error).filter(r => {
-    const status = (r.passed !== undefined ? (r.passed ? 'passed' : 'failed') : (r.status || '')).toString().toLowerCase();
+    const status = authStatusOf(r);
     if (onlyFailed && status !== 'failed') return false;
     if (nasFilter && r.nas_ip_address !== nasFilter) return false;
     if (reasonFilter && r.failure_reason !== reasonFilter) return false;
@@ -1073,7 +1141,7 @@ function renderAuthTable() {
   html += '<table><thead><tr><th>Timestamp</th><th>MAC</th><th>Esito</th><th>Utente</th><th>NAS</th><th>Policy autenticazione</th><th>Policy autorizzazione</th><th>Motivo fallimento</th><th>CoA correlato</th></tr></thead><tbody>';
   for (const r of rows) {
     const ts = r.acs_timestamp || r.timestamp || '-';
-    const status = (r.passed !== undefined ? (r.passed ? 'passed' : 'failed') : (r.status || '')).toString().toLowerCase();
+    const status = authStatusOf(r);
     const p = policyOf(r);
     const markers = findCoaMarkers(r._mac, ts);
     const coaCell = markers.length
