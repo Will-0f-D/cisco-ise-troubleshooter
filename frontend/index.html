@@ -152,7 +152,7 @@
     </div>
 
     <div class="card">
-      <h2>Connessione Switch</h2>
+      <h2>Connessione Switch / WLC</h2>
       <label>Host / IP</label>
       <input type="text" id="sw-host" placeholder="10.0.0.1">
       <div class="row">
@@ -168,6 +168,13 @@
         <option value="cisco_ios">cisco_ios</option>
         <option value="cisco_xe">cisco_xe</option>
         <option value="cisco_nxos">cisco_nxos</option>
+        <option value="cisco_wlc">cisco_wlc (WLC AireOS)</option>
+      </select>
+      <label>Piattaforma (per i quick command)</label>
+      <select id="sw-platform" onchange="onPlatformChange()">
+        <option value="switch">Switch (IOS/IOS-XE/NX-OS)</option>
+        <option value="wlc-aireos">WLC AireOS</option>
+        <option value="wlc-9800">WLC 9800 (IOS-XE)</option>
       </select>
       <label><input type="checkbox" id="sw-advanced"> Modalità avanzata (permette comandi diversi da "show")</label>
       <div class="profile-row">
@@ -181,7 +188,7 @@
   <main>
     <div class="tabs">
       <div class="tab active" data-tab="livelog" onclick="switchTab('livelog')">Live Log</div>
-      <div class="tab" data-tab="console" onclick="switchTab('console')">Switch Console</div>
+      <div class="tab" data-tab="console" onclick="switchTab('console')">Console (Switch/WLC)</div>
       <div class="tab" data-tab="diag" onclick="switchTab('diag')">Diagnostica</div>
       <div class="tab" data-tab="auth" onclick="switchTab('auth')">Autenticazioni</div>
       <div class="tab" data-tab="license" onclick="switchTab('license')">Licenze</div>
@@ -241,12 +248,7 @@
     </div>
 
     <div id="tab-console" class="tab-panel">
-      <div class="quick-cmds">
-        <button class="secondary" onclick="quickCmd('show authentication sessions')">show authentication sessions</button>
-        <button class="secondary" onclick="quickCmd('show authentication sessions mac ' + lastMac())">sessions by MAC</button>
-        <button class="secondary" onclick="quickCmd('show mac address-table address ' + lastMac())">mac address-table</button>
-        <button class="secondary" onclick="quickCmd('show authentication sessions interface ')">sessions by interface</button>
-      </div>
+      <div class="quick-cmds" id="quick-cmds"></div>
       <div class="row">
         <input type="text" id="cmd-input" placeholder="show authentication sessions...">
         <button onclick="runCommand()" style="flex:0 0 auto">Esegui</button>
@@ -325,7 +327,7 @@
 const $ = id => document.getElementById(id);
 
 const JSON_HEADERS = {'Content-Type':'application/json'};
-const FIELDS = ['ise-host','ise-user','ise-pass','ise-verify','ise-port','ise-ers-port','sw-host','sw-user','sw-pass','sw-secret','sw-port','sw-devtype','sw-advanced'];
+const FIELDS = ['ise-host','ise-user','ise-pass','ise-verify','ise-port','ise-ers-port','sw-host','sw-user','sw-pass','sw-secret','sw-port','sw-devtype','sw-platform','sw-advanced'];
 FIELDS.forEach(id => {
   const el = $(id);
   const saved = sessionStorage.getItem(id);
@@ -534,10 +536,10 @@ function renderSessions(sessions) {
   const box = $('ll-results');
   if (!sessions.length) { box.innerHTML = '<div class="empty">Nessuna sessione trovata.</div>'; return; }
   const cols = ['user_name','calling_station_id','framed_ip_address','nas_ip_address','nas_port_id','session_status','posture_status'];
-  let html = '<table><thead><tr>' + cols.map(c => `<th>${c.replace(/_/g,' ')}</th>`).join('') + '<th>Policy Server</th><th>Policy autenticazione</th><th>Policy autorizzazione</th><th>Profilo autorizzazione</th><th>Azioni</th></tr></thead><tbody>';
+  let html = '<table><thead><tr><th>tipo connessione</th>' + cols.map(c => `<th>${c.replace(/_/g,' ')}</th>`).join('') + '<th>Policy Server</th><th>Policy autenticazione</th><th>Policy autorizzazione</th><th>Profilo autorizzazione</th><th>Azioni</th></tr></thead><tbody>';
   sessions.forEach((s, i) => {
     const p = policyOf(s);
-    html += '<tr>' + cols.map(c => {
+    html += `<tr><td>${isWireless(s) ? 'Wireless' : 'Wired'}</td>` + cols.map(c => {
       const v = s[c] || '-';
       if (c === 'session_status' || c === 'posture_status') return `<td><span class="badge ${v}">${v}</span></td>`;
       return `<td>${v}</td>`;
@@ -557,13 +559,26 @@ function toast(msg, ok) {
 
 function macOf(session) { return session.calling_station_id || $('ll-value').value.trim(); }
 
+// Attributo RADIUS standard (NAS-Port-Type, #61): "Wireless - IEEE 802.11" per
+// sessioni originate da un WLC/AP. Su ISE il campo compare come nas_port_type.
+function isWireless(s) { return /wireless/i.test(s.nas_port_type || s.nas_port_type_name || ''); }
+
 function gotoSwitchAt(i) {
   const s = lastSessions[i];
   if (s.nas_ip_address) { $('sw-host').value = s.nas_ip_address; $('sw-host').dispatchEvent(new Event('change')); }
   switchTab('console');
   const mac = macOf(s);
-  if (s.nas_port_id) runCommands([`show authentication sessions interface ${s.nas_port_id}`, `show interface ${s.nas_port_id} status`]);
-  else runCommands([`show authentication sessions mac ${mac}`]);
+  if (isWireless(s)) {
+    // NAS IP qui è il WLC, non uno switch: il tab resta lo stesso ma i comandi e
+    // il device_type/piattaforma vanno adattati. Default AireOS - se il cliente
+    // usa un 9800 basta cambiare "Piattaforma" a sinistra (stesso host, altro CLI).
+    if ($('sw-platform').value === 'switch') { $('sw-platform').value = 'wlc-aireos'; onPlatformChange(); }
+    runCommands([`show client detail ${mac}`]);
+  } else if (s.nas_port_id) {
+    runCommands([`show authentication sessions interface ${s.nas_port_id}`, `show interface ${s.nas_port_id} status`]);
+  } else {
+    runCommands([`show authentication sessions mac ${mac}`]);
+  }
 }
 
 async function reauthAt(i) {
@@ -679,6 +694,50 @@ function exportCsv() {
 }
 
 // ---- Switch Console ----
+// Comandi show diversi per piattaforma: gli switch usano "show authentication
+// sessions" (802.1X/MAB sulla porta), gli AireOS WLC usano "show client",
+// i 9800 (IOS-XE) usano "show wireless client" - stessa CLI Netmiko IOS/IOS-XE
+// per la connessione, ma sintassi comandi diversa.
+const QUICK_CMDS = {
+  switch: [
+    ['show authentication sessions', () => 'show authentication sessions'],
+    ['sessions by MAC', () => 'show authentication sessions mac ' + lastMac()],
+    ['mac address-table', () => 'show mac address-table address ' + lastMac()],
+    ['sessions by interface', () => 'show authentication sessions interface '],
+  ],
+  'wlc-aireos': [
+    ['client detail', () => 'show client detail ' + lastMac()],
+    ['client summary', () => 'show client summary'],
+    ['client roam-history', () => 'show client roam-history ' + lastMac()],
+    ['ap summary', () => 'show ap summary'],
+  ],
+  'wlc-9800': [
+    ['wireless client detail', () => 'show wireless client mac-address ' + lastMac() + ' detail'],
+    ['wireless client summary', () => 'show wireless client summary'],
+    ['ap summary', () => 'show ap summary'],
+    ['wireless client ap', () => 'show wireless client ap mac-address ' + lastMac()],
+  ],
+};
+
+function renderQuickCmds() {
+  const platform = $('sw-platform').value;
+  const cmds = QUICK_CMDS[platform];
+  $('quick-cmds').innerHTML = cmds.map(([label]) => `<button class="secondary">${label}</button>`).join('');
+  $('quick-cmds').querySelectorAll('button').forEach((btn, i) => { btn.onclick = () => quickCmd(cmds[i][1]()); });
+}
+
+function onPlatformChange() {
+  const platform = $('sw-platform').value;
+  const devtype = $('sw-devtype');
+  if (platform === 'wlc-aireos') devtype.value = 'cisco_wlc';
+  else if (platform === 'wlc-9800') devtype.value = 'cisco_xe';
+  else if (devtype.value === 'cisco_wlc') devtype.value = 'cisco_ios';
+  devtype.dispatchEvent(new Event('change'));
+  renderQuickCmds();
+}
+
+renderQuickCmds();
+
 function quickCmd(cmd) { $('cmd-input').value = cmd; runCommand(); }
 
 async function execSwitchCommand(command) {
