@@ -34,6 +34,9 @@
   header .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-dim); display: inline-block; margin-right: 6px; }
   header .dot.ok { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
   header .dot.err { background: var(--err); box-shadow: 0 0 6px var(--err); }
+  .status-dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+  .status-dot.ok { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+  .status-dot.err { background: var(--err); box-shadow: 0 0 6px var(--err); }
   .status { font-size: 12px; color: var(--text-dim); margin-left: auto; display: flex; gap: 18px; }
 
   .layout { flex: 1; display: grid; grid-template-columns: 300px 1fr; overflow: hidden; }
@@ -532,18 +535,29 @@ function profileOf(s) {
     || (s.dacl || s.vlan ? `dACL: ${s.dacl || '-'} / VLAN: ${s.vlan || '-'}` : '-');
 }
 
+// Stessi stati "buoni" usati per il badge (.badge.AUTHENTICATED/.STARTED/.AUTHORIZED):
+// qualsiasi altro session_status (o assente) viene mostrato come pallino rosso.
+const SESSION_OK_STATES = ['AUTHENTICATED', 'STARTED', 'AUTHORIZED'];
+function sessionOk(s) { return SESSION_OK_STATES.includes((s.session_status || '').toUpperCase()); }
+
 function renderSessions(sessions) {
   const box = $('ll-results');
   if (!sessions.length) { box.innerHTML = '<div class="empty">Nessuna sessione trovata.</div>'; return; }
-  const cols = ['user_name','calling_station_id','framed_ip_address','nas_ip_address','nas_port_id','session_status','posture_status'];
-  let html = '<table><thead><tr><th>tipo connessione</th>' + cols.map(c => `<th>${c.replace(/_/g,' ')}</th>`).join('') + '<th>Policy Server</th><th>Policy autenticazione</th><th>Policy autorizzazione</th><th>Profilo autorizzazione</th><th>Azioni</th></tr></thead><tbody>';
+  const colsBefore = ['user_name'];
+  const colsAfter = ['calling_station_id','framed_ip_address','nas_ip_address','nas_port_id','session_status','posture_status'];
+  const th = c => `<th>${c.replace(/_/g,' ')}</th>`;
+  const td = (s, c) => {
+    const v = s[c] || '-';
+    if (c === 'session_status' || c === 'posture_status') return `<td><span class="badge ${v}">${v}</span></td>`;
+    return `<td>${v}</td>`;
+  };
+  let html = '<table><thead><tr><th>tipo connessione</th>' + colsBefore.map(th).join('') + '<th>esito</th>' + colsAfter.map(th).join('')
+    + '<th>Policy Server</th><th>Policy autenticazione</th><th>Policy autorizzazione</th><th>Profilo autorizzazione</th><th>Azioni</th></tr></thead><tbody>';
   sessions.forEach((s, i) => {
     const p = policyOf(s);
-    html += `<tr><td>${isWireless(s) ? 'Wireless' : 'Wired'}</td>` + cols.map(c => {
-      const v = s[c] || '-';
-      if (c === 'session_status' || c === 'posture_status') return `<td><span class="badge ${v}">${v}</span></td>`;
-      return `<td>${v}</td>`;
-    }).join('') + `<td>${policyServerOf(s)}</td><td>${p.authn}</td><td>${p.authz}</td><td>${profileOf(s)}</td><td class="actions-cell">
+    const dot = `<td><span class="status-dot ${sessionOk(s) ? 'ok' : 'err'}" title="${s.session_status || 'sconosciuto'}"></span></td>`;
+    html += `<tr><td>${isWireless(s) ? 'Wireless' : 'Wired'}</td>` + colsBefore.map(c => td(s, c)).join('') + dot + colsAfter.map(c => td(s, c)).join('')
+      + `<td>${policyServerOf(s)}</td><td>${p.authn}</td><td>${p.authz}</td><td>${profileOf(s)}</td><td class="actions-cell">
         <button class="secondary small" onclick="gotoSwitchAt(${i})">Switch</button>
         <button class="secondary small" onclick="reauthAt(${i})">Riautentica</button>
         <button class="danger small" onclick="disconnectAt(${i})">Disconnetti</button>
