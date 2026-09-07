@@ -230,6 +230,11 @@
       <div id="ll-authstatus-wrap" style="display:none">
         <div class="results-header">
           <h3>Storico autenticazioni (pass/fail, ultime 24h)</h3>
+          <select id="ll-authstatus-filter" onchange="renderAuthStatus()">
+            <option value="">Tutti gli esiti</option>
+            <option value="passed">Solo riusciti</option>
+            <option value="failed">Solo falliti</option>
+          </select>
         </div>
         <div id="ll-authstatus"></div>
       </div>
@@ -483,6 +488,10 @@ async function searchLiveLog() {
     renderSessions(sessions);
     sessions.forEach(s => addToWatchlist(macOf(s), s.user_name));
     if (mode === 'mac' && value) { loadAuthStatus(value); loadEndpointContext(value); }
+    else if (mode === 'user' && sessions.length && sessions[0].calling_station_id) {
+      const mac = sessions[0].calling_station_id;
+      loadAuthStatus(mac); loadEndpointContext(mac);
+    }
     if (mode !== 'active' && value) pushHistory(mode, value);
   } catch (e) {
     $('ise-dot').className = 'dot err';
@@ -510,18 +519,29 @@ function policyOf(s) {
 // sessioni attive"); acs_server = nome campo nello schema completo (ricerca per MAC/utente).
 function policyServerOf(s) { return s.acs_server || s.server || '-'; }
 
+// Cisco non documenta un campo XML separato per il "profilo" di autorizzazione
+// effettivamente applicato (distinto dalla policy/regola): nello schema restsdStatus
+// il nome della policy autorizzativa (authorization_policy) è l'unico campo confermato.
+// Si prova comunque un elenco di nomi candidati noti da altre integrazioni ISE (pxGrid/
+// Live Log), con dacl/vlan come indicatori indiretti se il nome profilo non c'è.
+function profileOf(s) {
+  return s.az_profile || s.authorization_profile || s.selected_authorization_profiles
+    || s.authorizationProfile || s.profile_name
+    || (s.dacl || s.vlan ? `dACL: ${s.dacl || '-'} / VLAN: ${s.vlan || '-'}` : '-');
+}
+
 function renderSessions(sessions) {
   const box = $('ll-results');
   if (!sessions.length) { box.innerHTML = '<div class="empty">Nessuna sessione trovata.</div>'; return; }
   const cols = ['user_name','calling_station_id','framed_ip_address','nas_ip_address','nas_port_id','session_status','posture_status'];
-  let html = '<table><thead><tr>' + cols.map(c => `<th>${c.replace(/_/g,' ')}</th>`).join('') + '<th>Policy Server</th><th>Policy autenticazione</th><th>Policy autorizzazione</th><th>Azioni</th></tr></thead><tbody>';
+  let html = '<table><thead><tr>' + cols.map(c => `<th>${c.replace(/_/g,' ')}</th>`).join('') + '<th>Policy Server</th><th>Policy autenticazione</th><th>Policy autorizzazione</th><th>Profilo autorizzazione</th><th>Azioni</th></tr></thead><tbody>';
   sessions.forEach((s, i) => {
     const p = policyOf(s);
     html += '<tr>' + cols.map(c => {
       const v = s[c] || '-';
       if (c === 'session_status' || c === 'posture_status') return `<td><span class="badge ${v}">${v}</span></td>`;
       return `<td>${v}</td>`;
-    }).join('') + `<td>${policyServerOf(s)}</td><td>${p.authn}</td><td>${p.authz}</td><td class="actions-cell">
+    }).join('') + `<td>${policyServerOf(s)}</td><td>${p.authn}</td><td>${p.authz}</td><td>${profileOf(s)}</td><td class="actions-cell">
         <button class="secondary small" onclick="gotoSwitchAt(${i})">Switch</button>
         <button class="secondary small" onclick="reauthAt(${i})">Riautentica</button>
         <button class="danger small" onclick="disconnectAt(${i})">Disconnetti</button>
@@ -580,24 +600,42 @@ async function disconnectAt(i) {
   } catch (e) { toast('Disconnect fallito: ' + e.message, false); }
 }
 
+let lastAuthStatusRecords = [];
+
+function authStatusOf(rec) {
+  return (rec.passed !== undefined ? (rec.passed ? 'passed' : 'failed') : (rec.status || '')).toString().toLowerCase();
+}
+
+function renderAuthStatus() {
+  const box = $('ll-authstatus');
+  const filter = $('ll-authstatus-filter').value;
+  const records = filter ? lastAuthStatusRecords.filter(rec => authStatusOf(rec) === filter) : lastAuthStatusRecords;
+  if (!records.length) { box.innerHTML = '<div class="empty">Nessun tentativo di autenticazione corrispondente.</div>'; return; }
+  let html = '<table><thead><tr><th>Timestamp</th><th>Esito</th><th>Utente</th><th>Motivo fallimento</th></tr></thead><tbody>';
+  for (const rec of records) {
+    const status = authStatusOf(rec);
+    html += `<tr><td>${rec.acs_timestamp || rec.timestamp || '-'}</td><td><span class="badge ${status}">${status || '-'}</span></td><td>${rec.user_name || '-'}</td><td>${rec.failure_reason || '-'}</td></tr>`;
+  }
+  html += '</tbody></table>';
+  box.innerHTML = html;
+}
+
 async function loadAuthStatus(mac) {
   const wrap = $('ll-authstatus-wrap');
   const box = $('ll-authstatus');
   wrap.style.display = '';
   box.innerHTML = '<div class="empty">Caricamento...</div>';
   try {
+    // AuthStatus MNT API di ISE espone solo la ricerca per MAC (nessuna variante
+    // "by username"), quindi per la modalità 'user' serve prima risolvere il MAC
+    // dalla sessione trovata.
     const body = { ...iseCreds(), mac, seconds: 86400, records: 20 };
     const r = await fetch('/api/ise/authstatus', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
     const records = await r.json();
     if (!r.ok) throw new Error(records.detail || 'errore');
+    lastAuthStatusRecords = records;
     if (!records.length) { box.innerHTML = '<div class="empty">Nessun tentativo di autenticazione nelle ultime 24h.</div>'; return; }
-    let html = '<table><thead><tr><th>Timestamp</th><th>Esito</th><th>Utente</th><th>Motivo fallimento</th></tr></thead><tbody>';
-    for (const rec of records) {
-      const status = (rec.passed !== undefined ? (rec.passed ? 'passed' : 'failed') : (rec.status || '')).toString().toLowerCase();
-      html += `<tr><td>${rec.acs_timestamp || rec.timestamp || '-'}</td><td><span class="badge ${status}">${status || '-'}</span></td><td>${rec.user_name || '-'}</td><td>${rec.failure_reason || '-'}</td></tr>`;
-    }
-    html += '</tbody></table>';
-    box.innerHTML = html;
+    renderAuthStatus();
   } catch (e) {
     box.innerHTML = `<div class="err-msg">${e.message}</div>`;
   }
@@ -706,6 +744,7 @@ function renderDiagnosis(mac, { sessions, authRecords, endpointCtx, switchOutput
     ['Utente', sessions[0].user_name], ['Stato', sessions[0].session_status],
     ['NAS', sessions[0].nas_ip_address], ['Porta switch', sessions[0].nas_port_id], ['Policy Server', policyServerOf(sessions[0])],
     ['Policy autenticazione', policyOf(sessions[0]).authn], ['Policy autorizzazione', policyOf(sessions[0]).authz],
+    ['Profilo autorizzazione', profileOf(sessions[0])],
   ]) : '<div class="empty">Nessuna sessione attiva.</div>';
 
   html += '<div class="section-title">Storico autenticazioni (24h)</div>';
@@ -754,7 +793,7 @@ function exportDiagnosis() {
   md += `## Verdetto\n${verdict.text}\n\n`;
   md += `## Sessione ISE\n`;
   md += sessions.length
-    ? `- Utente: ${s.user_name || '-'}\n- Stato: ${s.session_status || '-'}\n- NAS: ${s.nas_ip_address || '-'}\n- Porta switch: ${s.nas_port_id || '-'}\n- Policy Server: ${policyServerOf(s)}\n- Policy autenticazione: ${policyOf(s).authn}\n- Policy autorizzazione: ${policyOf(s).authz}\n\n`
+    ? `- Utente: ${s.user_name || '-'}\n- Stato: ${s.session_status || '-'}\n- NAS: ${s.nas_ip_address || '-'}\n- Porta switch: ${s.nas_port_id || '-'}\n- Policy Server: ${policyServerOf(s)}\n- Policy autenticazione: ${policyOf(s).authn}\n- Policy autorizzazione: ${policyOf(s).authz}\n- Profilo autorizzazione: ${profileOf(s)}\n\n`
     : 'Nessuna sessione attiva.\n\n';
   md += `## Storico autenticazioni (24h)\n`;
   md += authRecords.length
