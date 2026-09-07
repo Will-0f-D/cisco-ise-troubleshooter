@@ -21,9 +21,9 @@ function grab(header) {
 }
 
 const helpers = [
+  grab('function iseBool(v)'),
   grab('function isTrue(v)'),
-  grab('function otherAttrs(s)'),  // usato da sessionOutcome: va definito prima
-  'const SESSION_OK_STATES = ' + src.match(/const SESSION_OK_STATES = (\[[^\]]*\]);/)[1] + ';',
+  grab('function otherAttrs(s)'),
   grab('function sessionOutcome(s)'),
   grab('function isWireless(s)'),
   grab('function authStatusOf(rec)'),
@@ -47,14 +47,32 @@ const api = new Function(helpers + `
 const { sessionOutcome, isWireless, authStatusOf, policyOf, profilesOf, authMethodOf, authProtocolOf,
         indexCatalog, configuredRule } = api;
 
+// Tabella dell'esito: solo passed/failed, stringhe o booleani reali.
 // L'XML MNT arriva appiattito in stringhe: "false" non deve passare per vero.
 assert.equal(sessionOutcome({ passed: 'true', failed: 'false' }), 'ok');
 assert.equal(sessionOutcome({ passed: 'false', failed: 'true' }), 'err');
-assert.equal(sessionOutcome({ passed: true }), 'ok');
-assert.equal(sessionOutcome({ session_status: 'AUTHENTICATED' }), 'ok');
-assert.equal(sessionOutcome({ session_status: 'DISCONNECTED' }), 'err');
+assert.equal(sessionOutcome({ passed: 'false', failed: 'false' }), 'unknown');
+assert.equal(sessionOutcome({ passed: 'true', failed: 'true' }), 'conflict');
+assert.equal(sessionOutcome({ passed: true, failed: false }), 'ok');
+assert.equal(sessionOutcome({ passed: false, failed: true }), 'err');
+assert.equal(sessionOutcome({ passed: false, failed: false }), 'unknown');
+assert.equal(sessionOutcome({ passed: true, failed: true }), 'conflict');
+// Spazi e maiuscole non contano.
+assert.equal(sessionOutcome({ passed: ' TRUE ', failed: '	False' }), 'ok');
+// Campo assente, nullo o non booleano: indeterminato, mai un successo presunto.
+assert.equal(sessionOutcome({ passed: 'true' }), 'unknown');
+assert.equal(sessionOutcome({ passed: 'true', failed: null }), 'unknown');
+assert.equal(sessionOutcome({ passed: 'true', failed: '' }), 'unknown');
+assert.equal(sessionOutcome({ passed: '1', failed: '0' }), 'unknown');
+assert.equal(sessionOutcome({ passed: 'yes', failed: 'no' }), 'unknown');
 // Session/ActiveList non espone l'esito: indeterminato, non fallito.
 assert.equal(sessionOutcome({ user_name: 'x' }), 'unknown');
+// L'esito non si deduce da altri campi: session_status, il blob degli attributi
+// o i profili di autorizzazione descrivono altro.
+assert.equal(sessionOutcome({ session_status: 'AUTHENTICATED' }), 'unknown');
+assert.equal(sessionOutcome({ session_status: 'DISCONNECTED' }), 'unknown');
+assert.equal(sessionOutcome({ other_attributes_parsed: { AuthenticationStatus: 'AuthenticationPassed' } }), 'unknown');
+assert.equal(sessionOutcome({ selected_azn_profiles: 'PermitAccess', message_code: '5200' }), 'unknown');
 
 assert.equal(isWireless({ nas_port_type: 'Wireless - IEEE 802.11' }), true);
 assert.equal(isWireless({ nas_port_type: 'Ethernet' }), false);
@@ -126,12 +144,9 @@ assert.equal(policyOf(GUEST).policySet, 'SSID Guest Agenzie');
 assert.deepEqual(profilesOf(GUEST), ['Guest_Portal_Redirect']);
 assert.equal(policyOf({ other_attributes_parsed: { IdentitySelectionMatchedRule: 'Wireless MAB' } }).authn, null);
 assert.equal(policyOf({ selected_azn_profiles: 'Guest_Portal_Redirect' }).authz, null);
-// Le sessioni attive non portano passed/failed: l'esito e' nel blob, altrimenti
-// il pallino resta grigio anche per un'autenticazione riuscita.
-assert.equal(sessionOutcome(GUEST), 'ok');
-assert.equal(sessionOutcome({ other_attributes_parsed: { AuthenticationStatus: 'AuthenticationFailed' } }), 'err');
-// Valore non riconosciuto: indeterminato, mai dedotto come fallimento.
-assert.equal(sessionOutcome({ other_attributes_parsed: { AuthenticationStatus: 'Boh' } }), 'unknown');
+// Le regole si leggono dal blob, l'esito no: senza passed/failed resta indeterminato.
+assert.equal(sessionOutcome(GUEST), 'unknown');
+assert.equal(sessionOutcome({ ...GUEST, passed: 'true', failed: 'false' }), 'ok');
 
 assert.deepEqual(profilesOf({ selected_azn_profiles: 'PermitAccess, Corp_VLAN' }), ['PermitAccess', 'Corp_VLAN']);
 assert.equal(profilesOf({ dacl: 'ACL-X', vlan: '10' }), null, 'dacl/vlan non sono un profilo di autorizzazione');

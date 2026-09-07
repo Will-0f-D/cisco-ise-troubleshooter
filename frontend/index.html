@@ -38,6 +38,7 @@
   .status-dot.ok { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
   .status-dot.err { background: var(--err); box-shadow: 0 0 6px var(--err); }
   .status-dot.unknown { background: var(--text-dim); }
+  .status-dot.conflict { background: var(--warn); box-shadow: 0 0 6px var(--warn); }
   .na { color: var(--text-dim); font-style: italic; }
   .catalog-status { font-size: 11px; color: var(--text-dim); }
 .attr-dump { display: flex; flex-wrap: wrap; gap: 4px 16px; font-family: Consolas, monospace; font-size: 11px; color: var(--text-dim); max-height: 240px; overflow: auto; padding: 6px 2px; }
@@ -764,28 +765,40 @@ function profilesCell(s) {
   return `<td>${profiles.map(esc).join(', ')}</td>`;
 }
 
-// L'XML MNT viene appiattito in stringhe, quindi passed/failed arrivano come
-// "true"/"false": valutarli come booleani darebbe sempre true ("false" è truthy).
-function isTrue(v) { return String(v).trim().toLowerCase() === 'true'; }
-
-const SESSION_OK_STATES = ['AUTHENTICATED', 'STARTED', 'AUTHORIZED'];
-
-// passed/failed sono i campi ufficiali dell'esito nello schema restsdStatus;
-// session_status non esiste lì. Session/ActiveList non espone nessuno dei due,
-// quindi l'esito resta 'unknown' (pallino grigio) invece di fingere un rosso.
-function sessionOutcome(s) {
-  if (isTrue(s.passed)) return 'ok';
-  if (isTrue(s.failed)) return 'err';
-  // Alcune risposte portano l'esito solo dentro il blob degli attributi.
-  const status = otherAttrs(s).AuthenticationStatus || '';
-  if (/passed/i.test(status)) return 'ok';
-  if (/failed/i.test(status)) return 'err';
-  const st = (s.session_status || '').toUpperCase();
-  if (!st) return 'unknown';
-  return SESSION_OK_STATES.includes(st) ? 'ok' : 'err';
+// Booleano ISE: true/false reali oppure le stringhe "true"/"false" appiattite
+// dall'XML MNT, con spazi e maiuscole indifferenti. Qualsiasi altro valore
+// (assente, null, "", "1", "yes") non e' un booleano valido e vale null: la
+// veridicita' della stringa qui e' una trappola, "false" e' truthy.
+function iseBool(v) {
+  if (typeof v === 'boolean') return v;
+  if (typeof v !== 'string') return null;
+  const t = v.trim().toLowerCase();
+  return t === 'true' ? true : t === 'false' ? false : null;
 }
 
-const OUTCOME_LABEL = { ok: 'autenticazione riuscita', err: 'autenticazione fallita', unknown: 'esito non disponibile su questo endpoint ISE' };
+function isTrue(v) { return iseBool(v) === true; }
+
+// L'esito viene solo da passed/failed, i due campi ufficiali dello schema
+// restsdStatus. Non si deduce da session_status, AuthenticationStatus,
+// message_code o dai profili di autorizzazione: descrivono altro, e uno di essi
+// farebbe passare per riuscita una sessione mai valutata. Se anche uno solo dei
+// due manca o non e' un booleano, l'esito e' indeterminato, non un successo.
+function sessionOutcome(s) {
+  const passed = iseBool(s.passed), failed = iseBool(s.failed);
+  if (passed === null || failed === null) return 'unknown';
+  if (passed && failed) return 'conflict';  // ISE non dovrebbe emetterli entrambi
+  if (passed) return 'ok';
+  if (failed) return 'err';
+  return 'unknown';
+}
+
+const OUTCOME_LABEL = { ok: 'Successo', err: 'Fallimento', unknown: 'Indeterminato', conflict: 'Dati incoerenti' };
+const OUTCOME_HINT = {
+  ok: 'passed=true, failed=false',
+  err: 'passed=false, failed=true',
+  unknown: 'passed/failed assenti o non validi in questa risposta ISE',
+  conflict: 'ISE riporta passed=true e failed=true: dato incoerente, non interpretato',
+};
 
 // Ogni ISE popola un sottoinsieme diverso del centinaio di campi opzionali dello
 // schema. Quando una colonna resta "n/d" questo mostra cosa ISE ha realmente
@@ -822,7 +835,7 @@ function renderSessions(sessions) {
   sessions.forEach((s, i) => {
     const p = policyOf(s);
     const outcome = sessionOutcome(s);
-    const dot = `<td><span class="status-dot ${outcome}" title="${OUTCOME_LABEL[outcome]}"></span></td>`;
+    const dot = `<td title="${OUTCOME_HINT[outcome]}"><span class="status-dot ${outcome}"></span> ${OUTCOME_LABEL[outcome]}</td>`;
     const wifi = isWireless(s);
     html += `<tr><td>${wifi === null ? UNAVAILABLE : (wifi ? 'Wireless' : 'Wired')}</td>` + colsBefore.map(c => td(s, c)).join('') + dot + colsAfter.map(c => td(s, c)).join('')
       + plainCell(authMethodOf(s))
