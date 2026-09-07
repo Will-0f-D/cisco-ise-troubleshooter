@@ -810,7 +810,7 @@ function attrRow(s, i) {
   const body = fields.length
     ? fields.map(([k, v]) => `<span><b>${esc(k)}</b> = ${esc(v)}</span>`).join('')
     : '<span class="na">Nessun campo valorizzato in questa risposta.</span>';
-  return `<tr id="attrs-${i}" style="display:none"><td colspan="17"><div class="attr-dump">${body}</div></td></tr>`;
+  return `<tr id="attrs-${i}" style="display:none"><td colspan="16"><div class="attr-dump">${body}</div></td></tr>`;
 }
 
 function toggleAttrs(i) {
@@ -829,15 +829,14 @@ function renderSessions(sessions) {
     if (c === 'session_status' || c === 'posture_status') return `<td><span class="badge ${v}">${v}</span></td>`;
     return `<td>${v}</td>`;
   };
-  let html = '<table><thead><tr><th>tipo connessione</th>' + colsBefore.map(th).join('') + '<th>esito</th>' + colsAfter.map(th).join('')
+  let html = '<table><thead><tr>' + colsBefore.map(th).join('') + '<th>esito</th>' + colsAfter.map(th).join('')
     + '<th>Metodo autenticazione</th><th>Protocollo autenticazione</th>'
     + '<th>Policy Server</th><th>Policy set</th><th>Regola autenticazione</th><th>Regola autorizzazione</th><th>Profili autorizzazione</th><th>Azioni</th></tr></thead><tbody>';
   sessions.forEach((s, i) => {
     const p = policyOf(s);
     const outcome = sessionOutcome(s);
     const dot = `<td title="${OUTCOME_HINT[outcome]}"><span class="status-dot ${outcome}"></span> ${OUTCOME_LABEL[outcome]}</td>`;
-    const wifi = isWireless(s);
-    html += `<tr><td>${wifi === null ? UNAVAILABLE : (wifi ? 'Wireless' : 'Wired')}</td>` + colsBefore.map(c => td(s, c)).join('') + dot + colsAfter.map(c => td(s, c)).join('')
+    html += '<tr>' + colsBefore.map(c => td(s, c)).join('') + dot + colsAfter.map(c => td(s, c)).join('')
       + plainCell(authMethodOf(s))
       + plainCell(authProtocolOf(s))
       + `<td>${esc(policyServerOf(s))}</td>`
