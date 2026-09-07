@@ -626,10 +626,11 @@ function renderAuthStatus() {
   const filter = $('ll-authstatus-filter').value;
   const records = filter ? lastAuthStatusRecords.filter(rec => authStatusOf(rec) === filter) : lastAuthStatusRecords;
   if (!records.length) { box.innerHTML = '<div class="empty">Nessun tentativo di autenticazione corrispondente.</div>'; return; }
-  let html = '<table><thead><tr><th>Timestamp</th><th>Esito</th><th>Utente</th><th>Motivo fallimento</th></tr></thead><tbody>';
+  let html = '<table><thead><tr><th>Timestamp</th><th>Esito</th><th>Utente</th><th>Policy autenticazione</th><th>Policy autorizzazione</th><th>Motivo fallimento</th></tr></thead><tbody>';
   for (const rec of records) {
     const status = authStatusOf(rec);
-    html += `<tr><td>${rec.acs_timestamp || rec.timestamp || '-'}</td><td><span class="badge ${status}">${status || '-'}</span></td><td>${rec.user_name || '-'}</td><td>${rec.failure_reason || '-'}</td></tr>`;
+    const p = policyOf(rec);
+    html += `<tr><td>${rec.acs_timestamp || rec.timestamp || '-'}</td><td><span class="badge ${status}">${status || '-'}</span></td><td>${rec.user_name || '-'}</td><td>${p.authn}</td><td>${p.authz}</td><td>${rec.failure_reason || '-'}</td></tr>`;
   }
   html += '</tbody></table>';
   box.innerHTML = html;
@@ -807,7 +808,10 @@ function renderDiagnosis(mac, { sessions, authRecords, endpointCtx, switchOutput
   ]) : '<div class="empty">Nessuna sessione attiva.</div>';
 
   html += '<div class="section-title">Storico autenticazioni (24h)</div>';
-  html += authRecords.length ? kvCard(authRecords.slice(0, 5).map(r => [r.acs_timestamp || r.timestamp || '-', r.failure_reason || 'passed'])) : '<div class="empty">Nessun tentativo registrato.</div>';
+  html += authRecords.length ? kvCard(authRecords.slice(0, 5).map(r => {
+    const p = policyOf(r);
+    return [r.acs_timestamp || r.timestamp || '-', `${r.failure_reason || 'passed'} — Authn: ${p.authn} / Authz: ${p.authz}`];
+  })) : '<div class="empty">Nessun tentativo registrato.</div>';
 
   html += '<div class="section-title">Contesto endpoint (ERS)</div>';
   html += endpointCtx ? kvCard([
@@ -856,7 +860,10 @@ function exportDiagnosis() {
     : 'Nessuna sessione attiva.\n\n';
   md += `## Storico autenticazioni (24h)\n`;
   md += authRecords.length
-    ? authRecords.slice(0, 5).map(r => `- ${r.acs_timestamp || r.timestamp || '-'}: ${r.failure_reason || 'passed'}`).join('\n') + '\n\n'
+    ? authRecords.slice(0, 5).map(r => {
+        const p = policyOf(r);
+        return `- ${r.acs_timestamp || r.timestamp || '-'}: ${r.failure_reason || 'passed'} — Authn: ${p.authn} / Authz: ${p.authz}`;
+      }).join('\n') + '\n\n'
     : 'Nessun tentativo registrato.\n\n';
   md += `## Contesto endpoint (ERS)\n`;
   md += endpointCtx
@@ -1049,15 +1056,16 @@ function renderAuthTable() {
   if (!rows.length && !errors.length) { box.innerHTML = '<div class="empty">Nessun risultato per i filtri correnti.</div>'; return; }
 
   let html = errors.map(e => `<div class="err-msg">${e._mac}: ${e._error}</div>`).join('');
-  html += '<table><thead><tr><th>Timestamp</th><th>MAC</th><th>Esito</th><th>Utente</th><th>NAS</th><th>Motivo fallimento</th><th>CoA correlato</th></tr></thead><tbody>';
+  html += '<table><thead><tr><th>Timestamp</th><th>MAC</th><th>Esito</th><th>Utente</th><th>NAS</th><th>Policy autenticazione</th><th>Policy autorizzazione</th><th>Motivo fallimento</th><th>CoA correlato</th></tr></thead><tbody>';
   for (const r of rows) {
     const ts = r.acs_timestamp || r.timestamp || '-';
     const status = (r.passed !== undefined ? (r.passed ? 'passed' : 'failed') : (r.status || '')).toString().toLowerCase();
+    const p = policyOf(r);
     const markers = findCoaMarkers(r._mac, ts);
     const coaCell = markers.length
       ? markers.map(m => `<span class="badge passed" title="${new Date(m.ts).toLocaleString()} - ${m.result}">${m.action}</span>`).join(' ')
       : '-';
-    html += `<tr><td>${ts}</td><td>${r._mac}</td><td><span class="badge ${status}">${status || '-'}</span></td><td>${r.user_name || '-'}</td><td>${r.nas_ip_address || '-'}</td><td>${r.failure_reason || '-'}</td><td>${coaCell}</td></tr>`;
+    html += `<tr><td>${ts}</td><td>${r._mac}</td><td><span class="badge ${status}">${status || '-'}</span></td><td>${r.user_name || '-'}</td><td>${r.nas_ip_address || '-'}</td><td>${p.authn}</td><td>${p.authz}</td><td>${r.failure_reason || '-'}</td><td>${coaCell}</td></tr>`;
   }
   html += '</tbody></table>';
   box.innerHTML = html;
