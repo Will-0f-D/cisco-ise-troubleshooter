@@ -22,12 +22,12 @@ function grab(header) {
 
 const helpers = [
   grab('function isTrue(v)'),
+  grab('function otherAttrs(s)'),  // usato da sessionOutcome: va definito prima
   'const SESSION_OK_STATES = ' + src.match(/const SESSION_OK_STATES = (\[[^\]]*\]);/)[1] + ';',
   grab('function sessionOutcome(s)'),
   grab('function isWireless(s)'),
   grab('function authStatusOf(rec)'),
   'const NOT_AVAILABLE = null;',  // asserito sotto contro il sorgente
-  grab('function otherAttrs(s)'),
   grab('function firstValue('),
   grab('function matchKey('),
   grab('function policyOf(s)'),
@@ -105,6 +105,33 @@ assert.equal(authProtocolOf({ authen_protocol: 'PEAP (EAP-MSCHAPv2)' }), 'PEAP (
 assert.equal(authProtocolOf({ eap_authentication: 'EAP-MSCHAPv2' }), 'EAP-MSCHAPv2');
 assert.equal(authMethodOf({ user_name: 'x' }), null);
 assert.equal(authProtocolOf({ user_name: 'x' }), null);
+
+// Esempio reale di other_attr_string, gia' espanso dal backend in
+// other_attributes_parsed: deve arrivare nelle due colonne giuste.
+const GUEST = {
+  other_attributes_parsed: {
+    AuthenticationStatus: 'AuthenticationPassed',
+    IdentityPolicyMatchedRule: 'Wireless MAB',
+    AuthorizationPolicyMatchedRule: 'GuestDemanio-Auth-ISE02',
+    ISEPolicySetName: 'SSID Guest Agenzie',
+    IdentitySelectionMatchedRule: 'Wireless MAB',
+  },
+  selected_azn_profiles: 'Guest_Portal_Redirect',
+};
+assert.equal(policyOf(GUEST).authn, 'Wireless MAB');
+assert.equal(policyOf(GUEST).authz, 'GuestDemanio-Auth-ISE02');
+assert.equal(policyOf(GUEST).policySet, 'SSID Guest Agenzie');
+// L'autorizzazione non e' il profilo, e IdentitySelectionMatchedRule non e' la
+// regola di autenticazione: coincidono spesso, ma non sono lo stesso dato.
+assert.deepEqual(profilesOf(GUEST), ['Guest_Portal_Redirect']);
+assert.equal(policyOf({ other_attributes_parsed: { IdentitySelectionMatchedRule: 'Wireless MAB' } }).authn, null);
+assert.equal(policyOf({ selected_azn_profiles: 'Guest_Portal_Redirect' }).authz, null);
+// Le sessioni attive non portano passed/failed: l'esito e' nel blob, altrimenti
+// il pallino resta grigio anche per un'autenticazione riuscita.
+assert.equal(sessionOutcome(GUEST), 'ok');
+assert.equal(sessionOutcome({ other_attributes_parsed: { AuthenticationStatus: 'AuthenticationFailed' } }), 'err');
+// Valore non riconosciuto: indeterminato, mai dedotto come fallimento.
+assert.equal(sessionOutcome({ other_attributes_parsed: { AuthenticationStatus: 'Boh' } }), 'unknown');
 
 assert.deepEqual(profilesOf({ selected_azn_profiles: 'PermitAccess, Corp_VLAN' }), ['PermitAccess', 'Corp_VLAN']);
 assert.equal(profilesOf({ dacl: 'ACL-X', vlan: '10' }), null, 'dacl/vlan non sono un profilo di autorizzazione');

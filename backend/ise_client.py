@@ -56,10 +56,49 @@ def _parse_other_attributes(blob: str) -> dict:
     return out
 
 
+# other_attr_string usa un delimitatore esplicito ":!:" invece della virgola. È il
+# formato in cui ISE riporta davvero le regole applicate, e va spezzato solo su ":!:":
+# i singoli ':' compaiono dentro i valori.
+ATTR_STRING_SEP = ":!:"
+
+# Campi in cui ISE impacchetta gli attributi dell'evento come blob chiave=valore.
+_ATTR_BLOB_FIELDS = ("other_attributes", "other_attr_string")
+
+
+def _parse_attr_string(blob: str) -> dict:
+    """Segmenti separati da ':!:', ciascuno chiave=valore.
+
+    Si spezza solo al primo '=': il valore può contenerne altri (url-redirect,
+    Response=...). Segmenti vuoti o senza '=' vengono ignorati senza errori.
+    """
+    out = {}
+    for segment in blob.split(ATTR_STRING_SEP):
+        key, sep, value = segment.partition("=")
+        if sep and key.strip():
+            out[key.strip()] = value.strip()
+    return out
+
+
+def _parse_attr_blob(blob: str) -> dict:
+    """Sceglie il formato in base al delimitatore realmente presente nel blob."""
+    return _parse_attr_string(blob) if ATTR_STRING_SEP in blob else _parse_other_attributes(blob)
+
+
 def _enrich(record: dict) -> dict:
-    blob = record.get("other_attributes")
-    if isinstance(blob, str) and "=" in blob:
-        record["other_attributes_parsed"] = _parse_other_attributes(blob)
+    """Espande i blob di attributi in other_attributes_parsed.
+
+    Qui vivono i nomi delle regole applicate all'evento (IdentityPolicyMatchedRule,
+    AuthorizationPolicyMatchedRule, ISEPolicySetName): ISE spesso non li emette come
+    tag XML dedicati. Un blob assente, nullo o vuoto non produce nessuna chiave: un
+    attributo mancante resta mancante, non diventa un valore vuoto.
+    """
+    parsed = {}
+    for field in _ATTR_BLOB_FIELDS:
+        blob = record.get(field)
+        if isinstance(blob, str) and "=" in blob:
+            parsed.update(_parse_attr_blob(blob))
+    if parsed:
+        record["other_attributes_parsed"] = parsed
     return record
 
 

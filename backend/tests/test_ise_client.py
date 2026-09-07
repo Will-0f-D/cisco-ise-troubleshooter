@@ -4,6 +4,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from ise_client import (  # noqa: E402
+    _enrich,
     _mac,
     _merge_active_session,
     _normalize_rule,
@@ -199,6 +200,56 @@ def test_other_attributes_real_policy_names():
     assert parsed["EndPointMACAddress"] == "00-0C-29-46-F3-B8"
     assert parsed["Device Type"] == "Device Type#All Device Types#WLC"
     assert parsed["Location"] == "Location#All Locations#Milano"
+
+
+ATTR_STRING_EXAMPLE = (
+    ":!:AuthenticationStatus=AuthenticationPassed"
+    ":!:IdentityPolicyMatchedRule=Wireless MAB"
+    ":!:AuthorizationPolicyMatchedRule=GuestDemanio-Auth-ISE02"
+    ":!:ISEPolicySetName=SSID Guest Agenzie"
+    ":!:IdentitySelectionMatchedRule=Wireless MAB"
+)
+
+
+def test_other_attr_string_split_on_delimiter():
+    """other_attr_string usa ':!:' come separatore: spezzare sui singoli ':'
+    romperebbe valori che li contengono."""
+    parsed = _enrich({"other_attr_string": ATTR_STRING_EXAMPLE})["other_attributes_parsed"]
+    assert parsed["IdentityPolicyMatchedRule"] == "Wireless MAB"
+    assert parsed["AuthorizationPolicyMatchedRule"] == "GuestDemanio-Auth-ISE02"
+    assert parsed["ISEPolicySetName"] == "SSID Guest Agenzie"
+    # Chiave omonima ma diversa: non deve prendere il posto della regola di autenticazione.
+    assert parsed["IdentitySelectionMatchedRule"] == "Wireless MAB"
+
+
+def test_other_attr_string_value_keeps_extra_equals_and_colons():
+    parsed = _enrich({"other_attr_string": ":!:Response=url-redirect=https://ise:8443/portal?x=1:!:Foo=bar"})["other_attributes_parsed"]
+    assert parsed["Response"] == "url-redirect=https://ise:8443/portal?x=1"
+    assert parsed["Foo"] == "bar"
+
+
+def test_missing_or_empty_attr_blob_adds_no_keys():
+    for record in ({}, {"other_attr_string": ""}, {"other_attr_string": None}, {"other_attr_string": ":!::!:"}):
+        assert "other_attributes_parsed" not in _enrich(dict(record))
+
+
+SESSION_WITH_ATTR_STRING = """<?xml version="1.0"?>
+<sessionParameters>
+    <user_name>guest01</user_name>
+    <calling_station_id>00:0C:29:46:F3:B8</calling_station_id>
+    <other_attr_string>{}</other_attr_string>
+</sessionParameters>
+""".format(ATTR_STRING_EXAMPLE)
+
+
+def test_session_response_exposes_rules_from_attr_string():
+    """Stesso percorso usato dal tab Diagnostica (Session/MACAddress) e dalle
+    sessioni attive: le regole devono uscire dal blob gia' in _parse_records."""
+    record = _parse_records(SESSION_WITH_ATTR_STRING)[0]
+    parsed = record["other_attributes_parsed"]
+    assert parsed["IdentityPolicyMatchedRule"] == "Wireless MAB"
+    assert parsed["AuthorizationPolicyMatchedRule"] == "GuestDemanio-Auth-ISE02"
+    assert record["user_name"] == "guest01"
 
 
 def test_normalize_rule_reads_state_from_nested_rule():

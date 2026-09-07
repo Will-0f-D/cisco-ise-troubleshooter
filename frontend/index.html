@@ -574,6 +574,9 @@ async function searchLiveLog() {
 // contiene nessuno dei due: il backend completa ogni riga da Session/MACAddress. Se
 // quel dettaglio non arriva il dato resta assente, non "nessuna policy".
 const NOT_AVAILABLE = null;
+// Come si mostra un valore che l'API non ha restituito: mai vuoto e mai una parola
+// che somigli a un esito ("nessuno", "negato", "disabilitato").
+const UNAVAILABLE = '\u2014';
 
 function otherAttrs(s) { return s.other_attributes_parsed || {}; }
 
@@ -642,7 +645,7 @@ function authProtocolOf(s) {
 // Valore semplice dell'evento, senza correlazione con la configurazione.
 function plainCell(v) {
   return v === NOT_AVAILABLE
-    ? `<td><span class="na" title="Campo non restituito da questo endpoint ISE per questa sessione">n/d</span></td>`
+    ? `<td><span class="na" title="Campo non restituito da questo endpoint ISE per questa sessione">${UNAVAILABLE}</span></td>`
     : `<td>${esc(v)}</td>`;
 }
 
@@ -742,21 +745,21 @@ function configBadge(kind, name, policySetName) {
 // che è cosa diversa da "nessuna policy" o "negato".
 function ruleCell(name, kind, policySetName) {
   if (name === NOT_AVAILABLE) {
-    return `<td><span class="na" title="Campo non restituito da questo endpoint ISE per questa sessione">n/d</span></td>`;
+    return `<td><span class="na" title="Campo non restituito da questo endpoint ISE per questa sessione">${UNAVAILABLE}</span></td>`;
   }
   return `<td>${esc(name)}${configBadge(kind, name, policySetName)}</td>`;
 }
 
-function ruleText(v) { return v === NOT_AVAILABLE ? 'n/d (non restituito dall\'API)' : v; }
+function ruleText(v) { return v === NOT_AVAILABLE ? UNAVAILABLE : v; }
 function profilesText(s) {
   const p = profilesOf(s);
-  return p === NOT_AVAILABLE ? 'n/d (non restituito dall\'API)' : p.join(', ');
+  return p === NOT_AVAILABLE ? UNAVAILABLE : p.join(', ');
 }
 
 function profilesCell(s) {
   const profiles = profilesOf(s);
   if (profiles === NOT_AVAILABLE) {
-    return `<td><span class="na" title="Campo selected_azn_profiles non restituito per questa sessione">n/d</span></td>`;
+    return `<td><span class="na" title="Campo selected_azn_profiles non restituito per questa sessione">${UNAVAILABLE}</span></td>`;
   }
   return `<td>${profiles.map(esc).join(', ')}</td>`;
 }
@@ -773,6 +776,10 @@ const SESSION_OK_STATES = ['AUTHENTICATED', 'STARTED', 'AUTHORIZED'];
 function sessionOutcome(s) {
   if (isTrue(s.passed)) return 'ok';
   if (isTrue(s.failed)) return 'err';
+  // Alcune risposte portano l'esito solo dentro il blob degli attributi.
+  const status = otherAttrs(s).AuthenticationStatus || '';
+  if (/passed/i.test(status)) return 'ok';
+  if (/failed/i.test(status)) return 'err';
   const st = (s.session_status || '').toUpperCase();
   if (!st) return 'unknown';
   return SESSION_OK_STATES.includes(st) ? 'ok' : 'err';
@@ -817,7 +824,7 @@ function renderSessions(sessions) {
     const outcome = sessionOutcome(s);
     const dot = `<td><span class="status-dot ${outcome}" title="${OUTCOME_LABEL[outcome]}"></span></td>`;
     const wifi = isWireless(s);
-    html += `<tr><td>${wifi === null ? 'N/D' : (wifi ? 'Wireless' : 'Wired')}</td>` + colsBefore.map(c => td(s, c)).join('') + dot + colsAfter.map(c => td(s, c)).join('')
+    html += `<tr><td>${wifi === null ? UNAVAILABLE : (wifi ? 'Wireless' : 'Wired')}</td>` + colsBefore.map(c => td(s, c)).join('') + dot + colsAfter.map(c => td(s, c)).join('')
       + plainCell(authMethodOf(s))
       + plainCell(authProtocolOf(s))
       + `<td>${esc(policyServerOf(s))}</td>`
@@ -923,7 +930,7 @@ function renderAuthStatus() {
     const status = authStatusOf(rec);
     const p = policyOf(rec);
     html += `<tr><td>${esc(rec.acs_timestamp || rec.timestamp || '-')}</td>`
-      + `<td><span class="badge ${status}">${status || 'n/d'}</span></td><td>${esc(rec.user_name || '-')}</td>`
+      + `<td><span class="badge ${status}">${status || UNAVAILABLE}</span></td><td>${esc(rec.user_name || '-')}</td>`
       + plainCell(authMethodOf(rec))
       + plainCell(authProtocolOf(rec))
       + ruleCell(p.policySet, 'set', null)
@@ -958,7 +965,7 @@ async function loadAuthStatus(mac) {
 }
 
 function kvCard(fields) {
-  return '<div class="kv-card">' + fields.map(([k, v]) => `<div class="kv"><span class="k">${k}</span><span>${v ?? '-'}</span></div>`).join('') + '</div>';
+  return '<div class="kv-card">' + fields.map(([k, v]) => `<div class="kv"><span class="k">${k}</span><span>${v ?? UNAVAILABLE}</span></div>`).join('') + '</div>';
 }
 
 async function loadEndpointContext(mac) {
@@ -1093,7 +1100,7 @@ function renderDiagnosis(mac, { sessions, authRecords, endpointCtx, switchOutput
   html += '<div class="section-title">Sessione ISE</div>';
   html += sessions.length ? kvCard([
     ['Utente', sessions[0].user_name], ['Esito', OUTCOME_LABEL[sessionOutcome(sessions[0])]],
-    ['Tipo connessione', isWireless(sessions[0]) === null ? 'N/D' : (isWireless(sessions[0]) ? 'Wireless' : 'Wired')],
+    ['Tipo connessione', isWireless(sessions[0]) === null ? UNAVAILABLE : (isWireless(sessions[0]) ? 'Wireless' : 'Wired')],
     ['NAS', sessions[0].nas_ip_address], ['Porta switch', sessions[0].nas_port_id], ['Policy Server', policyServerOf(sessions[0])],
     ['Policy set', ruleText(policyOf(sessions[0]).policySet)],
     ['Metodo autenticazione', ruleText(authMethodOf(sessions[0]))],
@@ -1106,7 +1113,7 @@ function renderDiagnosis(mac, { sessions, authRecords, endpointCtx, switchOutput
   html += '<div class="section-title">Storico autenticazioni (24h)</div>';
   html += authRecords.length ? kvCard(authRecords.slice(0, 5).map(r => {
     const p = policyOf(r);
-    return [r.acs_timestamp || r.timestamp || '-', `${authStatusOf(r) || 'n/d'}${r.failure_reason ? ' — ' + r.failure_reason : ''} — Authn: ${ruleText(p.authn)} / Authz: ${ruleText(p.authz)}`];
+    return [r.acs_timestamp || r.timestamp || '-', `${authStatusOf(r) || UNAVAILABLE}${r.failure_reason ? ' — ' + r.failure_reason : ''} — Authn: ${ruleText(p.authn)} / Authz: ${ruleText(p.authz)}`];
   })) : '<div class="empty">Nessun tentativo registrato.</div>';
 
   html += '<div class="section-title">Contesto endpoint (ERS)</div>';
@@ -1159,13 +1166,13 @@ function exportDiagnosis() {
   md += `## Verdetto\n${verdict.text}\n\n`;
   md += `## Sessione ISE\n`;
   md += sessions.length
-    ? `- Utente: ${s.user_name || '-'}\n- Esito: ${OUTCOME_LABEL[sessionOutcome(s)]}\n- Tipo connessione: ${isWireless(s) === null ? 'N/D' : (isWireless(s) ? 'Wireless' : 'Wired')}\n- NAS: ${s.nas_ip_address || '-'}\n- Porta switch: ${s.nas_port_id || '-'}\n- Metodo autenticazione: ${ruleText(authMethodOf(s))}\n- Protocollo autenticazione: ${ruleText(authProtocolOf(s))}\n- Policy Server: ${policyServerOf(s)}\n- Policy set: ${ruleText(policyOf(s).policySet)}\n- Regola autenticazione: ${ruleText(policyOf(s).authn)}\n- Regola autorizzazione: ${ruleText(policyOf(s).authz)}\n- Profili autorizzazione: ${profilesText(s)}\n\n`
+    ? `- Utente: ${s.user_name || '-'}\n- Esito: ${OUTCOME_LABEL[sessionOutcome(s)]}\n- Tipo connessione: ${isWireless(s) === null ? UNAVAILABLE : (isWireless(s) ? 'Wireless' : 'Wired')}\n- NAS: ${s.nas_ip_address || '-'}\n- Porta switch: ${s.nas_port_id || '-'}\n- Metodo autenticazione: ${ruleText(authMethodOf(s))}\n- Protocollo autenticazione: ${ruleText(authProtocolOf(s))}\n- Policy Server: ${policyServerOf(s)}\n- Policy set: ${ruleText(policyOf(s).policySet)}\n- Regola autenticazione: ${ruleText(policyOf(s).authn)}\n- Regola autorizzazione: ${ruleText(policyOf(s).authz)}\n- Profili autorizzazione: ${profilesText(s)}\n\n`
     : 'Nessuna sessione attiva.\n\n';
   md += `## Storico autenticazioni (24h)\n`;
   md += authRecords.length
     ? authRecords.slice(0, 5).map(r => {
         const p = policyOf(r);
-        return `- ${r.acs_timestamp || r.timestamp || '-'}: ${authStatusOf(r) || 'n/d'}${r.failure_reason ? ' — ' + r.failure_reason : ''} — Authn: ${ruleText(p.authn)} / Authz: ${ruleText(p.authz)}`;
+        return `- ${r.acs_timestamp || r.timestamp || '-'}: ${authStatusOf(r) || UNAVAILABLE}${r.failure_reason ? ' — ' + r.failure_reason : ''} — Authn: ${ruleText(p.authn)} / Authz: ${ruleText(p.authz)}`;
       }).join('\n') + '\n\n'
     : 'Nessun tentativo registrato.\n\n';
   md += `## Contesto endpoint (ERS)\n`;
@@ -1368,7 +1375,7 @@ function renderAuthTable() {
     const coaCell = markers.length
       ? markers.map(m => `<span class="badge passed" title="${new Date(m.ts).toLocaleString()} - ${m.result}">${m.action}</span>`).join(' ')
       : '-';
-    html += `<tr><td>${esc(ts)}</td><td>${esc(r._mac)}</td><td><span class="badge ${status}">${status || 'n/d'}</span></td>`
+    html += `<tr><td>${esc(ts)}</td><td>${esc(r._mac)}</td><td><span class="badge ${status}">${status || UNAVAILABLE}</span></td>`
       + `<td>${esc(r.user_name || '-')}</td><td>${esc(r.nas_ip_address || '-')}</td>`
       + plainCell(authMethodOf(r))
       + plainCell(authProtocolOf(r))
