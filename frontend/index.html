@@ -261,6 +261,7 @@
         <button class="secondary small" onclick="loadPolicyCatalog(true)">Ricarica catalogo policy</button>
         <button class="secondary small" onclick="exportCsv()">Esporta CSV</button>
       </div>
+      <div id="ll-columns" class="col-picker"></div>
       <div id="ll-results"><div class="empty">Nessuna ricerca eseguita.</div></div>
       <div id="ll-toast"></div>
 
@@ -317,6 +318,23 @@
       <p style="color:var(--text-dim); font-size:12px; margin-top:-8px">
         Combina sessione ISE, storico autenticazioni, contesto ERS e (se compilata) la connessione switch a sinistra.
       </p>
+      <details class="diag-config">
+        <summary>Valori attesi e soglie dei controlli rapidi</summary>
+        <p style="color:var(--text-dim); font-size:12px">
+          Vuoti = nessun confronto. Le soglie sono impostazioni di questa applicazione, non valori Cisco di riferimento.
+        </p>
+        <div class="dcfg-grid">
+          <label>Policy Set atteso<input type="text" id="dcfg-policyset"></label>
+          <label>Regola di autenticazione attesa<input type="text" id="dcfg-authn"></label>
+          <label>Regola di autorizzazione attesa<input type="text" id="dcfg-authz"></label>
+          <label>Profilo di autorizzazione atteso<input type="text" id="dcfg-profile"></label>
+          <label>Metodo atteso (es. dot1x)<input type="text" id="dcfg-method"></label>
+          <label>Soglia response_time (unità della sorgente)<input type="number" id="dcfg-rt"></label>
+          <label>Finestra ripetizioni (min)<input type="number" id="dcfg-window"></label>
+          <label>Tentativi minimi nella finestra<input type="number" id="dcfg-attempts"></label>
+        </div>
+        <button class="secondary small" onclick="saveDiagConfig()">Salva impostazioni</button>
+      </details>
       <div class="results-header">
         <h3>Risultato</h3>
         <button class="secondary small" onclick="exportDiagnosis()">Esporta diagnosi</button>
@@ -545,7 +563,6 @@ async function searchLiveLog() {
     const sessions = await r.json();
     if (!r.ok) throw new Error(sessions.detail || 'errore');
     $('ise-dot').className = 'dot ok';
-    lastSessions = sessions;
     renderSessions(sessions);
     // Una sola volta per host, in parallelo: non blocca la tabella e non viene
     // rifatta a ogni auto-refresh né per riga.
@@ -580,13 +597,156 @@ async function searchLiveLog() {
 // "Tutte le sessioni attive" parte dallo schema ridotto simpleActiveSession, che non
 // contiene nessuno dei due: il backend completa ogni riga da Session/MACAddress. Se
 // quel dettaglio non arriva il dato resta assente, non "nessuna policy".
+// ===== MODELLO EVENTO ISE (inizio) =====
+// Logica condivisa da Live Log, tab Diagnostica, dettaglio evento ed export:
+// funzioni pure, nessun accesso al DOM e nessuna chiamata di rete. Il blocco viene
+// estratto ed eseguito così com'è da tests/frontend_helpers.test.mjs.
 const NOT_AVAILABLE = null;
 // Come si mostra un valore che l'API non ha restituito: mai vuoto e mai una parola
 // che somigli a un esito ("nessuno", "negato", "disabilitato").
-const UNAVAILABLE = '\u2014';
+const UNAVAILABLE = '—';
 
-function otherAttrs(s) { return s.other_attributes_parsed || {}; }
+// Booleano ISE: true/false reali oppure le stringhe "true"/"false" appiattite
+// dall'XML MNT, con spazi e maiuscole indifferenti. Qualsiasi altro valore
+// (assente, null, "", "1", "yes") non e' un booleano valido e vale null: la
+// veridicita' della stringa qui e' una trappola, "false" e' truthy.
+function iseBool(v) {
+  if (typeof v === 'boolean') return v;
+  if (typeof v !== 'string') return null;
+  const t = v.trim().toLowerCase();
+  return t === 'true' ? true : t === 'false' ? false : null;
+}
 
+function isTrue(v) { return iseBool(v) === true; }
+
+// L'esito viene solo da passed/failed, i due campi ufficiali dello schema
+// restsdStatus. Non si deduce da session_status, AuthenticationStatus,
+// message_code o dai profili di autorizzazione: descrivono altro, e uno di essi
+// farebbe passare per riuscita una sessione mai valutata. Se anche uno solo dei
+// due manca o non e' un booleano, l'esito e' indeterminato, non un successo.
+function sessionOutcome(s) {
+  const passed = iseBool(s.passed), failed = iseBool(s.failed);
+  if (passed === null || failed === null) return 'unknown';
+  if (passed && failed) return 'conflict';  // ISE non dovrebbe emetterli entrambi
+  if (passed) return 'ok';
+  if (failed) return 'err';
+  return 'unknown';
+}
+
+const OUTCOME_LABEL = { ok: 'Successo', err: 'Fallimento', unknown: 'Indeterminato', conflict: 'Dati incoerenti' };
+const OUTCOME_HINT = {
+  ok: 'passed=true, failed=false',
+  err: 'passed=false, failed=true',
+  unknown: 'passed/failed assenti o non validi in questa risposta ISE',
+  conflict: 'ISE riporta passed=true e failed=true: dato incoerente, non interpretato',
+};
+
+// ---- Attributi dell'evento: valore + provenienza ----
+// Lo stesso attributo arriva in forme diverse secondo endpoint e versione: oggetto
+// strutturato other_attributes, chiavi piatte "other_attributes.X", oppure il blob
+// other_attr_string. Si preferisce il valore strutturato e si ripiega sul blob,
+// conservando per ogni chiave da dove viene.
+const ATTR_STRING_SEP = ':!:';
+const FLAT_ATTR_PREFIX = 'other_attributes.';
+const ATTR_FROM_STRUCT = 'other_attributes';
+const ATTR_FROM_BLOB = 'other_attr_string';
+
+// Segmenti separati da ':!:', ciascuno chiave=valore spezzato solo al primo '=':
+// il valore può contenere altri '=', due punti e spazi interni, e un valore vuoto
+// è un dato, non un attributo assente.
+function parseAttrString(blob) {
+  const out = {};
+  if (typeof blob !== 'string') return out;
+  for (const segment of blob.split(ATTR_STRING_SEP)) {
+    const i = segment.indexOf('=');
+    if (i <= 0) continue;
+    const key = segment.slice(0, i).trim();
+    if (key) out[key] = segment.slice(i + 1);
+  }
+  return out;
+}
+
+function structuredAttrs(s) {
+  const out = {};
+  const oa = s.other_attributes;
+  if (oa && typeof oa === 'object' && !Array.isArray(oa)) Object.assign(out, oa);
+  Object.assign(out, s.other_attributes_parsed || {});
+  for (const [k, v] of Object.entries(s)) {
+    if (k.startsWith(FLAT_ATTR_PREFIX) && k.length > FLAT_ATTR_PREFIX.length) out[k.slice(FLAT_ATTR_PREFIX.length)] = v;
+  }
+  return out;
+}
+
+const attrModelCache = new WeakMap();
+
+// { values, origin, conflicts }: conflicts elenca le chiavi che le due
+// rappresentazioni riportano diverse. Non se ne sceglie una in silenzio: vince il
+// valore strutturato e la discrepanza resta visibile nel dettaglio evento.
+function attrModel(s) {
+  if (attrModelCache.has(s)) return attrModelCache.get(s);
+  const values = {}, origin = {}, conflicts = [];
+  const backendOrigin = s.other_attributes_sources || {};
+  for (const [k, v] of Object.entries(structuredAttrs(s))) {
+    values[k] = v;
+    origin[k] = backendOrigin[k] === ATTR_FROM_BLOB ? ATTR_FROM_BLOB : ATTR_FROM_STRUCT;
+  }
+  for (const [k, v] of Object.entries(parseAttrString(s.other_attr_string))) {
+    if (!(k in values)) { values[k] = v; origin[k] = ATTR_FROM_BLOB; continue; }
+    if (origin[k] === ATTR_FROM_STRUCT && String(values[k]).trim() !== String(v).trim()) {
+      conflicts.push({ key: k, structured: values[k], blob: v });
+    }
+  }
+  // Discrepanze gia' rilevate dal backend, che vede i due blob originali.
+  for (const c of s.other_attributes_conflicts || []) {
+    if (!conflicts.some(x => x.key === c.key)) {
+      conflicts.push({ key: c.key, structured: c.other_attributes, blob: c.other_attr_string });
+    }
+  }
+  const model = { values, origin, conflicts };
+  attrModelCache.set(s, model);
+  return model;
+}
+
+function otherAttrs(s) { return attrModel(s).values; }
+
+// ---- Attributi della risposta RADIUS ----
+// La risposta ripete lo stesso attributo più volte (cisco-av-pair porta sia
+// url-redirect sia url-redirect-acl): un dizionario a valore singolo ne perderebbe
+// uno, quindi si conserva la lista di coppie nell'ordine originale.
+function parseResponseAttrs(raw) {
+  const pairs = [];
+  if (typeof raw !== 'string') return pairs;
+  const body = raw.trim().replace(/^\{/, '').replace(/\}$/, '');
+  if (!body.trim()) return pairs;
+  for (const chunk of body.split(/[;,]\s*(?=[A-Za-z0-9_.\-]+\s*=)/)) {
+    const i = chunk.indexOf('=');
+    if (i <= 0) continue;
+    const key = chunk.slice(0, i).trim();
+    if (key) pairs.push([key, chunk.slice(i + 1).trim().replace(/[;,]\s*$/, '')]);
+  }
+  return pairs;
+}
+
+// Attributi restituiti da ISE al NAD (Access-Accept), distinti da quelli ricevuti
+// nella richiesta: confonderli fa sembrare assegnato ciò che è stato solo chiesto.
+function responseAttrs(s) {
+  const raw = s.response ?? s.radius_response ?? attrModel(s).values.Response;
+  return parseResponseAttrs(raw);
+}
+
+function responseValues(s, name) {
+  const wanted = name.toLowerCase();
+  return responseAttrs(s).filter(([k]) => k.toLowerCase() === wanted).map(([, v]) => v);
+}
+
+// Attributi della richiesta/evento con la provenienza di ciascuno, esclusa la
+// risposta che ha una sezione propria.
+function requestAttrEntries(s) {
+  const { values, origin } = attrModel(s);
+  return Object.entries(values).filter(([k]) => k !== 'Response').map(([k, v]) => [k, v, origin[k]]);
+}
+
+// ---- Getter dei campi mappati ----
 function firstValue(...candidates) {
   const v = candidates.find(c => typeof c === 'string' && c.trim() !== '');
   return v === undefined ? NOT_AVAILABLE : v.trim();
@@ -608,22 +768,21 @@ function matchKey(s, wanted, unwanted) {
   return NOT_AVAILABLE;
 }
 
+// IdentitySelectionMatchedRule non è la regola di autenticazione, il policy set non
+// è una regola e selected_azn_profiles non è la regola di autorizzazione: sono dati
+// distinti che spesso coincidono, ed è per questo che vanno esclusi esplicitamente.
 function policyOf(s) {
   const oa = otherAttrs(s);
   return {
     policySet: firstValue(oa.ISEPolicySetName, s.policy_set_name)
       ?? matchKey(s, /policyset/),
-    authn: firstValue(s.identity_policy_matched_rule, oa.IdentityPolicyMatchedRule)
-      ?? matchKey(s, /(identity|authentication)polic/, /authoriz|profile|store/),
-    authz: firstValue(s.authorization_policy, oa.AuthorizationPolicyMatchedRule, s.azn_exp_pol_matched_rule)
+    authn: firstValue(oa.IdentityPolicyMatchedRule, s.identity_policy_matched_rule)
+      ?? matchKey(s, /(identity|authentication)polic/, /authoriz|profile|store|selection/),
+    authz: firstValue(oa.AuthorizationPolicyMatchedRule, s.authorization_policy, s.azn_exp_pol_matched_rule)
       ?? matchKey(s, /authoriz.*polic|azn.*(polic|matchedrule)/, /profile/),
     serviceSelection: firstValue(s.service_selection_policy, oa.ServiceSelectionMatchedRule),
   };
 }
-
-// server = nome campo nello schema ridotto "simpleActiveSession" (ricerca "Tutte le
-// sessioni attive"); acs_server = nome campo nello schema completo (ricerca per MAC/utente).
-function policyServerOf(s) { return s.acs_server || s.server || '-'; }
 
 // selected_azn_profiles è il campo Cisco confermato per i profili di autorizzazione
 // restituiti (presente anche nel set base di restAuthStatus). dacl/vlan NON sono il
@@ -634,9 +793,9 @@ function profilesOf(s) {
   return raw === NOT_AVAILABLE ? NOT_AVAILABLE : raw.split(',').map(p => p.trim()).filter(Boolean);
 }
 
-// Metodo (dot1x / mab / ...) e protocollo EAP negoziato. I nomi dei tag cambiano
-// per endpoint e versione: lo schema di sessione usa authen_protocol, AuthStatus
-// eap_authentication, e in other_attributes compaiono le forme CamelCase.
+// Metodo (dot1x / mab / ...) e protocollo negoziato (PEAP, Lookup per il MAB). I nomi
+// dei tag cambiano per endpoint e versione: lo schema di sessione usa authen_protocol,
+// AuthStatus eap_authentication, e in other_attributes compaiono le forme CamelCase.
 function authMethodOf(s) {
   return firstValue(s.authentication_method, otherAttrs(s).AuthenticationMethod)
     ?? matchKey(s, /authenticationmethod/);
@@ -649,15 +808,375 @@ function authProtocolOf(s) {
     ?? matchKey(s, /auth.*protocol|eapauthentication/);
 }
 
+function identityStoreOf(s) {
+  const oa = otherAttrs(s);
+  return firstValue(s.identity_store, oa.IdentityStore, oa.IdentityStoreName)
+    ?? matchKey(s, /identitystore/, /list|guid/);
+}
+
+// acs_server = nome del campo nello schema completo (ricerca per MAC/utente);
+// server = nome nello schema ridotto simpleActiveSession (tutte le sessioni attive).
+// Stesso dato, nomi diversi: il secondo è il fallback del primo.
+function iseNodeOf(s) {
+  return firstValue(s.acs_server, s.server, otherAttrs(s).AcsServerName);
+}
+
+function policyServerOf(s) { return iseNodeOf(s) ?? '-'; }
+
+function responseTimeOf(s) {
+  return firstValue(s.response_time, otherAttrs(s).ResponseTime);
+}
+
+// ---- MAC ----
+// Un MAC vale come MAC solo se contiene esattamente 12 cifre esadecimali: maiuscole
+// e separatori (:, -, .) sono forma, non identità, e differenze di forma non sono
+// anomalie. Tutto il resto non è un MAC e torna null invece di essere forzato.
+function normMac(v) {
+  if (typeof v !== 'string') return null;
+  const t = v.trim();
+  if (!t || /[0-9A-Za-z]{13,}/.test(t) || /[^0-9A-Fa-f:.\- ]/.test(t)) return null;
+  const hex = t.replace(/[^0-9A-Fa-f]/g, '');
+  return hex.length === 12 ? hex.toUpperCase().match(/../g).join(':') : null;
+}
+
+// ---- Redirect al portale ----
+// Il token del portale è una credenziale di sessione: non va mostrato né esportato.
+function maskToken(v) {
+  if (typeof v !== 'string') return v;
+  return v.replace(/([?&]token=)[^&\s"']*/gi, '$1***');
+}
+
+// url-redirect e url-redirect-acl arrivano come cisco-av-pair ripetuti nella
+// risposta. Si leggono anche dagli attributi dell'evento, ma la provenienza resta
+// distinta: un attributo presente nella richiesta non è un attributo restituito.
+const REDIRECT_URL_RE = /url-redirect\s*=\s*(\S+)/i;
+const REDIRECT_ACL_RE = /url-redirect-acl\s*=\s*(\S+)/i;
+
+function redirectInfo(s) {
+  const find = (list) => {
+    let url = NOT_AVAILABLE, acl = NOT_AVAILABLE;
+    for (const c of list) {
+      const a = c.match(REDIRECT_ACL_RE);
+      if (a) { if (acl === NOT_AVAILABLE) acl = a[1].replace(/[;,]$/, ''); continue; }
+      const u = c.match(REDIRECT_URL_RE);
+      if (u && url === NOT_AVAILABLE) url = u[1].replace(/[;,]$/, '');
+    }
+    return { url, acl };
+  };
+  let r = find(responseAttrs(s).map(([k, v]) => `${k}=${v}`));
+  let source = 'risposta';
+  if (r.url === NOT_AVAILABLE && r.acl === NOT_AVAILABLE) {
+    r = find(Object.entries(otherAttrs(s)).map(([k, v]) => `${k}=${v}`)
+      .concat(typeof s.cisco_av_pair === 'string' ? [s.cisco_av_pair] : []));
+    source = (r.url === NOT_AVAILABLE && r.acl === NOT_AVAILABLE) ? NOT_AVAILABLE : 'attributi evento';
+  }
+  const m = r.url === NOT_AVAILABLE ? null : r.url.match(/^[A-Za-z][A-Za-z0-9+.\-]*:\/\/([^/:?#]+)(?::(\d+))?/);
+  return {
+    url: r.url, acl: r.acl, source,
+    host: m ? m[1] : NOT_AVAILABLE,
+    port: m && m[2] ? m[2] : NOT_AVAILABLE,
+    masked: r.url === NOT_AVAILABLE ? NOT_AVAILABLE : maskToken(r.url),
+  };
+}
+
+// ---- Latenze e passaggi ----
+// StepLatency arriva come coppie "indice=durata". L'unità non è dichiarata nello
+// schema della sorgente: si riporta il numero così com'è, senza etichettarlo "ms".
+function stepLatencies(s) {
+  const raw = firstValue(otherAttrs(s).StepLatency, s.step_latency);
+  if (raw === NOT_AVAILABLE) return [];
+  const out = [];
+  for (const part of raw.split(',')) {
+    const m = part.trim().match(/^(\d+)\s*=\s*(\d+)$/);
+    if (m) out.push({ step: m[1], value: Number(m[2]) });
+  }
+  return out.sort((a, b) => b.value - a.value);
+}
+
+function executionSteps(s) {
+  const raw = firstValue(s.execution_steps, otherAttrs(s).ExecutionSteps);
+  return raw === NOT_AVAILABLE ? [] : raw.split(',').map(x => x.trim()).filter(Boolean);
+}
+
+// ---- Check rapidi ----
+// Soglie e finestre di partenza dell'applicazione, NON soglie Cisco: la soglia sui
+// tempi resta nulla finché non la si imposta, così nessun check inventa un limite.
+const DEFAULT_DIAG_CONFIG = {
+  responseTimeWarn: null,
+  repetitionWindowMin: 15,
+  repetitionMinAttempts: 5,
+  expected: {},  // policySet, authn, authz, profile, method attesi, se configurati
+};
+
+const CHECK_LEVEL_LABEL = { info: 'Informazione', warn: 'Anomalia', insufficient: 'Dati insufficienti' };
+
+function parseEventTs(v) {
+  if (v == null || v === '') return NaN;
+  const t = String(v).trim();
+  if (/^\d{10,}$/.test(t)) return Number(t.length > 12 ? t : t + '000');
+  return new Date(t.replace(' ', 'T')).getTime();
+}
+
+function eventTs(s) { return parseEventTs(s.acs_timestamp || s.timestamp || s.acct_timestamp); }
+
+// Ogni check restituisce risultato, attributi che lo giustificano e prossimo
+// controllo suggerito, con livello informazione / anomalia / dati insufficienti.
+// Nessun check modifica l'esito e nessuno trasforma un dato assente in un
+// fallimento: un dato che manca è 'insufficient'.
+function eventChecks(s, config, history) {
+  const cfg = { ...DEFAULT_DIAG_CONFIG, ...(config || {}) };
+  const expected = cfg.expected || {};
+  const oa = otherAttrs(s);
+  const p = policyOf(s);
+  const out = [];
+  const show = v => (v === NOT_AVAILABLE || v == null || v === '' ? UNAVAILABLE : String(v));
+  const add = (id, title, level, result, evidence, next) =>
+    out.push({ id, title, level, result, evidence: evidence.map(([k, v]) => [k, maskToken(show(v))]), next });
+
+  // 1. Coerenza dell'esito: AuthenticationStatus non cambia l'esito, lo conferma o lo contraddice.
+  const outcome = sessionOutcome(s);
+  const declared = oa.AuthenticationStatus || '';
+  const declaredOutcome = /passed/i.test(declared) ? 'ok' : /failed/i.test(declared) ? 'err' : null;
+  const outcomeEvidence = [['passed', s.passed], ['failed', s.failed], ['AuthenticationStatus', declared || NOT_AVAILABLE]];
+  if (!declared) {
+    add('outcome', 'Coerenza dell’esito', 'insufficient',
+      `Esito da passed/failed: ${OUTCOME_LABEL[outcome]}. AuthenticationStatus non presente: nessun confronto possibile.`,
+      outcomeEvidence, 'Aprire il dettaglio dell’evento su ISE per leggere AuthenticationStatus.');
+  } else if (declaredOutcome && outcome !== 'unknown' && declaredOutcome !== outcome) {
+    add('outcome', 'Coerenza dell’esito', 'warn',
+      `Contraddizione: passed/failed indicano ${OUTCOME_LABEL[outcome]}, AuthenticationStatus riporta "${declared}". L’esito mostrato resta quello di passed/failed.`,
+      outcomeEvidence, 'Confrontare l’evento originale su ISE: i due campi possono descrivere fasi diverse dello stesso flusso.');
+  } else {
+    add('outcome', 'Coerenza dell’esito', 'info',
+      `Esito da passed/failed: ${OUTCOME_LABEL[outcome]}; AuthenticationStatus concorde ("${declared}").`,
+      outcomeEvidence, 'Nessun ulteriore controllo su questo punto.');
+  }
+
+  // 2. Redirect guest: presenza degli attributi nella risposta, non esito del login.
+  const rd = redirectInfo(s);
+  const rdEvidence = [['url-redirect', rd.masked], ['url-redirect-acl', rd.acl],
+                      ['host portale', rd.host], ['porta', rd.port], ['origine', rd.source]];
+  if (rd.url !== NOT_AVAILABLE && rd.acl !== NOT_AVAILABLE) {
+    add('redirect', 'Redirect guest', 'info', 'Redirect al portale restituito.', rdEvidence,
+      'Verificare sul NAD che l’ACL di redirect esista e sia applicata: da questo evento non risultano né il login guest né la navigazione.');
+  } else if (rd.url === NOT_AVAILABLE && rd.acl === NOT_AVAILABLE) {
+    add('redirect', 'Redirect guest', 'info', 'Nessun attributo di redirect in questo evento.', rdEvidence,
+      'Se il flusso atteso è CWA, controllare il profilo di autorizzazione applicato.');
+  } else {
+    add('redirect', 'Redirect guest', 'info', 'Attributi di redirect presenti solo in parte: vedi il controllo successivo.',
+      rdEvidence, 'Vedi "Attributi redirect incompleti".');
+  }
+
+  // 3. Redirect incompleto: da verificare, non "configurazione errata".
+  if ((rd.url === NOT_AVAILABLE) !== (rd.acl === NOT_AVAILABLE)) {
+    add('redirect-partial', 'Attributi redirect incompleti', 'warn',
+      'Attributi redirect da verificare: presente solo ' + (rd.url !== NOT_AVAILABLE ? 'l’URL' : 'l’ACL') + '.',
+      rdEvidence, 'Controllare il profilo di autorizzazione su ISE e la configurazione del NAD: la configurazione va verificata, non è detto sia errata.');
+  } else {
+    add('redirect-partial', 'Attributi redirect incompleti', 'info',
+      rd.url !== NOT_AVAILABLE ? 'URL e ACL entrambi presenti.' : 'Nessun attributo redirect da verificare.', rdEvidence, '');
+  }
+
+  // 4. Policy applicata: mostrata insieme, mai giudicata dal nome della regola.
+  const profiles = profilesOf(s);
+  const profileText = profiles === NOT_AVAILABLE ? NOT_AVAILABLE : profiles.join(', ');
+  const policyEvidence = [['Policy Set', p.policySet], ['Regola di autenticazione', p.authn],
+                          ['Regola di autorizzazione', p.authz], ['Profilo di autorizzazione', profileText]];
+  const deviations = [
+    ['Policy Set', expected.policySet, p.policySet],
+    ['Regola di autenticazione', expected.authn, p.authn],
+    ['Regola di autorizzazione', expected.authz, p.authz],
+    ['Profilo di autorizzazione', expected.profile, profileText],
+  ].filter(([, exp, act]) => exp && act !== NOT_AVAILABLE && String(exp).trim().toLowerCase() !== String(act).trim().toLowerCase());
+  const hasExpected = !!(expected.policySet || expected.authn || expected.authz || expected.profile);
+  if (deviations.length) {
+    add('policy', 'Policy applicata', 'warn',
+      'Scostamento dai valori attesi configurati: ' + deviations.map(([n, exp, act]) => `${n} atteso "${exp}", applicato "${act}"`).join('; ') + '.',
+      policyEvidence, 'Verificare su ISE quale regola ha effettivamente corrisposto: il nome della regola non dice se è quella giusta.');
+  } else {
+    add('policy', 'Policy applicata', 'info', 'Policy set, regole e profilo applicati a questo evento.', policyEvidence,
+      hasExpected ? 'Nessuno scostamento dai valori attesi configurati.'
+                  : 'Per rilevare scostamenti, configurare i valori attesi nel tab Diagnostica.');
+  }
+
+  // 5. Metodo e protocollo: MAB al posto di 802.1X è un'anomalia solo se 802.1X è l'atteso configurato.
+  const method = authMethodOf(s), protocol = authProtocolOf(s);
+  const methodEvidence = [['authentication_method', method], ['authentication_protocol', protocol],
+                          ['UseCase', oa.UseCase ?? NOT_AVAILABLE], ['Identity Store', identityStoreOf(s)]];
+  const expectMethod = (expected.method || '').trim().toLowerCase();
+  if (expectMethod && method !== NOT_AVAILABLE && method.toLowerCase() !== expectMethod) {
+    add('method', 'Metodo e protocollo', 'warn',
+      `Metodo "${method}" diverso da quello atteso "${expected.method}" per questo contesto.`, methodEvidence,
+      'Verificare la configurazione della porta/SSID e la regola di autenticazione applicata.');
+  } else if (method === NOT_AVAILABLE && protocol === NOT_AVAILABLE) {
+    add('method', 'Metodo e protocollo', 'insufficient', 'Metodo e protocollo non presenti in questo evento.',
+      methodEvidence, 'Recuperare l’evento originale su ISE.');
+  } else {
+    add('method', 'Metodo e protocollo', 'info', `Metodo ${show(method)}, protocollo ${show(protocol)}.`, methodEvidence,
+      expectMethod ? 'Metodo conforme all’atteso configurato.'
+                   : 'Per segnalare MAB al posto di 802.1X, configurare il metodo atteso nel tab Diagnostica.');
+  }
+
+  // 6. Identità endpoint: si confrontano MAC normalizzati, non stringhe.
+  const macFields = [['calling_station_id', s.calling_station_id], ['orig_calling_station_id', s.orig_calling_station_id],
+                     ['EndPointMACAddress', oa.EndPointMACAddress]];
+  const macs = macFields.map(([k, v]) => normMac(v)).filter(Boolean);
+  const userMac = normMac(s.user_name);
+  // L'username vale come MAC solo dove rappresenta davvero un MAC (flussi MAB).
+  if (userMac && String(method).toLowerCase() === 'mab') macs.push(userMac);
+  const distinct = [...new Set(macs)];
+  const macEvidence = macFields.map(([k, v]) => [k, v ?? NOT_AVAILABLE])
+    .concat([['user_name', s.user_name ?? NOT_AVAILABLE], ['MAC normalizzati', distinct.join(', ') || NOT_AVAILABLE]]);
+  if (!distinct.length) {
+    add('identity', 'Identità endpoint', 'insufficient', 'Nessun MAC valido in questo evento.', macEvidence,
+      'Verificare calling_station_id sull’evento originale.');
+  } else if (distinct.length === 1) {
+    add('identity', 'Identità endpoint', 'info', `MAC endpoint coerenti dopo normalizzazione (${distinct[0]}).`, macEvidence,
+      'Nessun ulteriore controllo su questo punto.');
+  } else {
+    add('identity', 'Identità endpoint', 'warn', `MAC diversi nello stesso evento: ${distinct.join(' / ')}.`, macEvidence,
+      'Verificare sul NAD quale MAC ha generato la richiesta: può trattarsi di un dispositivo dietro un altro (telefono IP, hub).');
+  }
+
+  // 7. Profilazione: "Unknown" è un'informazione, non un'autenticazione fallita.
+  const profileName = responseValues(s, 'profile-name')[0]
+    ?? (responseAttrs(s).map(([, v]) => v).find(v => /profile-name\s*=/i.test(v)) || '').split('=').slice(1).join('=');
+  const endpointPolicy = firstValue(s.endpoint_policy, oa.EndPointPolicy, oa.EndpointPolicy);
+  const profEvidence = [['identity_group', firstValue(s.identity_group, oa.IdentityGroup)],
+                        ['endpoint_policy', endpointPolicy], ['profile-name (risposta)', profileName || NOT_AVAILABLE]];
+  add('profiling', 'Profilazione', endpointPolicy === NOT_AVAILABLE ? 'insufficient' : 'info',
+    endpointPolicy === NOT_AVAILABLE ? 'Nessun dato di profilazione in questo evento.'
+      : /^unknown$/i.test(endpointPolicy) ? 'Endpoint non profilato ("Unknown"): è un’informazione, non un’autenticazione fallita.'
+                                          : `Profilo endpoint: ${endpointPolicy}.`,
+    profEvidence, 'Per il dettaglio consultare il contesto endpoint (ERS) o il profiler di ISE.');
+
+  // 8. Tempi: valori separati, unità non dichiarata dalla sorgente.
+  const rt = responseTimeOf(s);
+  const timeEvidence = [['response_time', rt], ['TotalAuthenLatency', oa.TotalAuthenLatency ?? NOT_AVAILABLE],
+                        ['ClientLatency', oa.ClientLatency ?? NOT_AVAILABLE]];
+  const rtNum = rt === NOT_AVAILABLE ? NaN : Number(String(rt).replace(/[^\d.]/g, ''));
+  if (rt === NOT_AVAILABLE && !oa.TotalAuthenLatency && !oa.ClientLatency) {
+    add('timing', 'Tempi', 'insufficient', 'Nessun dato di latenza in questo evento.', timeEvidence,
+      'Recuperare il report dettagliato dell’autenticazione su ISE.');
+  } else if (cfg.responseTimeWarn != null && !isNaN(rtNum) && rtNum > cfg.responseTimeWarn) {
+    add('timing', 'Tempi', 'warn', `response_time ${rt} oltre la soglia configurata (${cfg.responseTimeWarn}).`, timeEvidence,
+      'Confrontare con eventi omogenei dello stesso contesto: l’unità di misura va verificata nel contratto della sorgente.');
+  } else {
+    add('timing', 'Tempi', 'info', 'Latenze come restituite da ISE; unità non dichiarata nello schema.', timeEvidence,
+      cfg.responseTimeWarn == null
+        ? 'Per segnalare i tempi alti, configurare una soglia nel tab Diagnostica: non esiste una soglia Cisco di riferimento.'
+        : 'Entro la soglia configurata.');
+  }
+
+  // 9. Passaggi più lenti: indice e durata, senza descrizioni non verificate.
+  const steps = stepLatencies(s);
+  const execSteps = executionSteps(s);
+  if (!steps.length) {
+    add('steps', 'Passaggi più lenti', 'insufficient', 'StepLatency non presente in questo evento.',
+      [['StepLatency', NOT_AVAILABLE], ['execution_steps', execSteps.length || NOT_AVAILABLE]],
+      'Recuperare il report dettagliato dell’autenticazione su ISE.');
+  } else {
+    // L'indice si associa a execution_steps solo se gli indici ci stanno davvero
+    // dentro: senza corrispondenza verificata si mostra il numero e basta.
+    const mapped = execSteps.length > 0 && steps.every(x => Number(x.step) < execSteps.length);
+    add('steps', 'Passaggi più lenti', 'info',
+      steps.slice(0, 3).map(x => `indice ${x.step}: ${x.value}`).join(' | '),
+      [['StepLatency', firstValue(oa.StepLatency, s.step_latency)],
+       ['execution_steps', execSteps.length ? execSteps.length + ' passaggi' : NOT_AVAILABLE],
+       ['indice → passaggio', mapped ? execSteps[Number(steps[0].step)] : 'non verificabile: gli indici non corrispondono a execution_steps']],
+      'Le durate sono numeri restituiti da ISE: verificare unità e significato dei codici sul report originale.');
+  }
+
+  // 10. Contesto di rete: la VLAN chiesta nella richiesta non è quella assegnata.
+  const vlanResponse = responseValues(s, 'Tunnel-Private-Group-ID')[0];
+  add('network', 'Contesto di rete', 'info', 'Contesto riportato da questo evento.', [
+    ['NAD', firstValue(s.network_device_name, oa.NetworkDeviceName, s.nas_identifier)],
+    ['IP NAS', firstValue(s.nas_ip_address, oa.NasIpAddress)],
+    ['IP destinazione', firstValue(s.destination_ip_address, oa.DestinationIPAddress)],
+    ['Nodo ISE', iseNodeOf(s)],
+    ['Porta NAS', firstValue(s.nas_port_id, s.nas_port, oa.NasPortId)],
+    ['SSID', firstValue(oa.SSID, s.ssid, s.called_station_id)],
+    ['WLAN', firstValue(oa.AirespaceWlanId, s.airespace_wlan_id, oa.WlanId)],
+    ['VLAN nella richiesta', firstValue(oa['Tunnel-Private-Group-ID'], s.vlan, oa.VlanId)],
+    ['VLAN nella risposta', vlanResponse ?? NOT_AVAILABLE],
+  ], 'La VLAN nella richiesta è quella dichiarata dal NAD: solo quella nella risposta è assegnata da ISE.');
+
+  // 11. Ripetizione degli eventi: indizi, non cause certe.
+  const hist = (history || []).filter(h => h && h !== s);
+  const t0 = eventTs(s);
+  const near = isNaN(t0) ? [] : hist.filter(h => Math.abs(eventTs(h) - t0) <= cfg.repetitionWindowMin * 60000);
+  if (hist.length < 2 || isNaN(t0)) {
+    add('repetition', 'Ripetizione degli eventi', 'insufficient', 'Storico insufficiente per valutare le ripetizioni.',
+      [['eventi confrontabili', hist.length], ['finestra', cfg.repetitionWindowMin + ' min']],
+      'Caricare lo storico pass/fail del MAC dal Live Log per estendere la finestra.');
+  } else {
+    const outcomes = near.map(sessionOutcome).filter(o => o === 'ok' || o === 'err');
+    const flapping = outcomes.some((o, i) => i > 0 && o !== outcomes[i - 1]);
+    const psns = [...new Set(near.map(iseNodeOf).filter(v => v !== NOT_AVAILABLE))];
+    const rules = [...new Set(near.map(h => policyOf(h).authz).filter(v => v !== NOT_AVAILABLE))];
+    const notes = [];
+    if (near.length + 1 >= cfg.repetitionMinAttempts) notes.push(`${near.length + 1} tentativi entro ${cfg.repetitionWindowMin} min`);
+    if (flapping) notes.push('alternanza successo/fallimento');
+    if (psns.length > 1) notes.push(`PSN diversi (${psns.join(', ')})`);
+    if (rules.length > 1) notes.push(`regole di autorizzazione diverse (${rules.join(', ')})`);
+    add('repetition', 'Ripetizione degli eventi', notes.length ? 'warn' : 'info',
+      notes.length ? 'Indizi da verificare: ' + notes.join('; ') + '.' : 'Nessuna ripetizione anomala nella finestra configurata.',
+      [['tentativi nella finestra', near.length + 1], ['finestra', cfg.repetitionWindowMin + ' min'],
+       ['soglia tentativi', cfg.repetitionMinAttempts], ['PSN coinvolti', psns.join(', ') || NOT_AVAILABLE]],
+      'Sono indizi, non cause: confrontare con la configurazione del NAD e con i log del client.');
+  }
+
+  // 12. Correlazione sessione: identificativi distinti, mai equiparati.
+  const ids = [
+    ['auth_id', s.auth_id], ['cpmsession_id', s.cpmsession_id], ['audit_session_id', s.audit_session_id],
+    ['other_attributes.CPMSessionID', oa.CPMSessionID], ['AcsSessionID', firstValue(s.acs_session_id, oa.AcsSessionID)],
+  ].map(([k, v]) => [k, v == null || v === '' ? NOT_AVAILABLE : String(v).trim()]);
+  const present = ids.filter(([, v]) => v !== NOT_AVAILABLE);
+  const distinctIds = [...new Set(present.filter(([k]) => /session/i.test(k)).map(([, v]) => v))];
+  if (present.length < 2) {
+    add('correlation', 'Correlazione sessione', 'insufficient', 'Identificativi di sessione insufficienti per una correlazione.',
+      ids, 'Recuperare l’evento originale su ISE con gli identificativi completi.');
+  } else if (distinctIds.length > 1) {
+    add('correlation', 'Correlazione sessione', 'warn', 'Correlazione da verificare: gli identificativi di sessione non coincidono.',
+      ids, 'Confrontare i valori completi sull’evento originale: non sono intercambiabili e gli eventi non vanno uniti sul solo MAC.');
+  } else {
+    add('correlation', 'Correlazione sessione', 'info', 'Identificativi di sessione coerenti fra loro.', ids,
+      'Conservare il valore completo: un identificativo troncato non è un identificativo.');
+  }
+
+  // 13. Ciò che questo evento non può dimostrare.
+  add('not-verifiable', 'Non verificabile da questo evento', 'insufficient',
+    'Certificati, DNS, CoA, raggiungibilità del portale, applicazione dell’ACL e accesso finale alla rete non sono deducibili da questo evento.',
+    [['contatori accounting', firstValue(s.acct_input_octets, s.acct_output_octets)],
+     ['nota', 'contatori a zero in un evento di autenticazione non provano assenza di traffico']],
+    'Controlli necessari: sul NAD "show authentication session" e l’ACL applicata; sul client DNS e raggiungibilità del portale; su ISE il log del CoA.');
+
+  return out;
+}
+
+// Riepilogo per l'indicatore del Live Log: i check si calcolano una volta sola e la
+// lista completa viaggia con il riepilogo, senza rieseguirli per il dettaglio.
+function checkSummary(s, config, history) {
+  const checks = eventChecks(s, config, history);
+  const warnings = checks.filter(c => c.level === 'warn');
+  return {
+    warnings: warnings.length,
+    insufficient: checks.filter(c => c.level === 'insufficient').length,
+    titles: warnings.map(c => c.title),
+    checks,
+  };
+}
+// ===== MODELLO EVENTO ISE (fine) =====
+
+function esc(s) {
+  return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+}
+
 // Valore semplice dell'evento, senza correlazione con la configurazione.
 function plainCell(v) {
   return v === NOT_AVAILABLE
     ? `<td><span class="na" title="Campo non restituito da questo endpoint ISE per questa sessione">${UNAVAILABLE}</span></td>`
     : `<td>${esc(v)}</td>`;
-}
-
-function esc(s) {
-  return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 }
 
 // ---- Catalogo policy (Open API) ----
@@ -771,52 +1290,153 @@ function profilesCell(s) {
   return `<td>${profiles.map(esc).join(', ')}</td>`;
 }
 
-// Booleano ISE: true/false reali oppure le stringhe "true"/"false" appiattite
-// dall'XML MNT, con spazi e maiuscole indifferenti. Qualsiasi altro valore
-// (assente, null, "", "1", "yes") non e' un booleano valido e vale null: la
-// veridicita' della stringa qui e' una trappola, "false" e' truthy.
-function iseBool(v) {
-  if (typeof v === 'boolean') return v;
-  if (typeof v !== 'string') return null;
-  const t = v.trim().toLowerCase();
-  return t === 'true' ? true : t === 'false' ? false : null;
+// ---- Colonne mappate sugli attributi dell'evento ----
+// Le prime cinque sono visibili per default, le altre si attivano dal selettore.
+// Tutte e dieci restano comunque nel dettaglio evento, in Diagnostica e negli export.
+const EVENT_COLUMNS = [
+  { id: 'outcome', label: 'Esito',
+    value: s => OUTCOME_LABEL[sessionOutcome(s)],
+    cell: s => { const o = sessionOutcome(s); return `<td title="${OUTCOME_HINT[o]}"><span class="status-dot ${o}"></span> ${OUTCOME_LABEL[o]}</td>`; } },
+  { id: 'authn', label: 'Regola di autenticazione',
+    value: s => policyOf(s).authn,
+    cell: s => { const p = policyOf(s); return ruleCell(p.authn, 'authn', p.policySet); } },
+  { id: 'authz', label: 'Regola di autorizzazione',
+    value: s => policyOf(s).authz,
+    cell: s => { const p = policyOf(s); return ruleCell(p.authz, 'authz', p.policySet); } },
+  { id: 'method', label: 'Metodo di autenticazione', value: authMethodOf },
+  { id: 'protocol', label: 'Protocollo di autenticazione', value: authProtocolOf },
+  { id: 'policyset', label: 'Policy Set',
+    value: s => policyOf(s).policySet,
+    cell: s => ruleCell(policyOf(s).policySet, 'set', null) },
+  { id: 'profiles', label: 'Profilo di autorizzazione',
+    value: s => { const p = profilesOf(s); return p === NOT_AVAILABLE ? NOT_AVAILABLE : p.join(', '); },
+    cell: profilesCell },
+  { id: 'store', label: 'Identity Store', value: identityStoreOf },
+  { id: 'node', label: 'Nodo ISE', value: iseNodeOf },
+  { id: 'rtt', label: 'Tempo di risposta', value: responseTimeOf },
+];
+
+const COLUMNS_KEY = 'll-visible-columns';
+const DEFAULT_COLUMNS = EVENT_COLUMNS.slice(0, 5).map(c => c.id);
+
+function visibleColumns() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(COLUMNS_KEY) || 'null');
+    if (Array.isArray(saved)) return EVENT_COLUMNS.filter(c => saved.includes(c.id));
+  } catch { /* preferenza illeggibile: si torna alle colonne di default */ }
+  return EVENT_COLUMNS.filter(c => DEFAULT_COLUMNS.includes(c.id));
 }
 
-function isTrue(v) { return iseBool(v) === true; }
-
-// L'esito viene solo da passed/failed, i due campi ufficiali dello schema
-// restsdStatus. Non si deduce da session_status, AuthenticationStatus,
-// message_code o dai profili di autorizzazione: descrivono altro, e uno di essi
-// farebbe passare per riuscita una sessione mai valutata. Se anche uno solo dei
-// due manca o non e' un booleano, l'esito e' indeterminato, non un successo.
-function sessionOutcome(s) {
-  const passed = iseBool(s.passed), failed = iseBool(s.failed);
-  if (passed === null || failed === null) return 'unknown';
-  if (passed && failed) return 'conflict';  // ISE non dovrebbe emetterli entrambi
-  if (passed) return 'ok';
-  if (failed) return 'err';
-  return 'unknown';
+function renderColumnPicker() {
+  const on = new Set(visibleColumns().map(c => c.id));
+  $('ll-columns').innerHTML = EVENT_COLUMNS.map(c =>
+    `<label class="col-pick"><input type="checkbox" ${on.has(c.id) ? 'checked' : ''} onchange="toggleColumn('${c.id}', this.checked)"> ${esc(c.label)}</label>`).join('');
 }
 
-const OUTCOME_LABEL = { ok: 'Successo', err: 'Fallimento', unknown: 'Indeterminato', conflict: 'Dati incoerenti' };
-const OUTCOME_HINT = {
-  ok: 'passed=true, failed=false',
-  err: 'passed=false, failed=true',
-  unknown: 'passed/failed assenti o non validi in questa risposta ISE',
-  conflict: 'ISE riporta passed=true e failed=true: dato incoerente, non interpretato',
-};
+function toggleColumn(id, on) {
+  const ids = visibleColumns().map(c => c.id).filter(x => x !== id);
+  if (on) ids.push(id);
+  localStorage.setItem(COLUMNS_KEY, JSON.stringify(ids));
+  if (lastSessions.length) renderSessions(lastSessions); else renderColumnPicker();
+}
 
-// Ogni ISE popola un sottoinsieme diverso del centinaio di campi opzionali dello
-// schema. Quando una colonna resta "n/d" questo mostra cosa ISE ha realmente
-// restituito per quella riga, senza dover leggere l'XML a mano.
-function attrRow(s, i) {
-  const fields = Object.entries(s)
-    .filter(([, v]) => typeof v === 'string' && v.trim() !== '')
-    .concat(Object.entries(otherAttrs(s)).map(([k, v]) => ['other_attributes.' + k, v]));
-  const body = fields.length
-    ? fields.map(([k, v]) => `<span><b>${esc(k)}</b> = ${esc(v)}</span>`).join('')
-    : '<span class="na">Nessun campo valorizzato in questa risposta.</span>';
-  return `<tr id="attrs-${i}" style="display:none"><td colspan="16"><div class="attr-dump">${body}</div></td></tr>`;
+function columnText(col, s) {
+  const v = col.value(s);
+  return v === NOT_AVAILABLE || v == null || v === '' ? UNAVAILABLE : String(v);
+}
+
+// ---- Configurazione dei controlli rapidi ----
+// Valori attesi e soglie restano vuoti finché non li imposti: senza un atteso
+// configurato nessun check dichiara uno scostamento, e nessuna soglia sui tempi
+// viene inventata al posto di una soglia Cisco che non esiste.
+const DIAG_CONFIG_KEY = 'diag-config';
+
+function diagConfig() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(DIAG_CONFIG_KEY) || '{}');
+    return { ...DEFAULT_DIAG_CONFIG, ...saved, expected: { ...(saved.expected || {}) } };
+  } catch { return { ...DEFAULT_DIAG_CONFIG }; }
+}
+
+function saveDiagConfig() {
+  const num = id => { const v = $(id).value.trim(); return v === '' ? null : Number(v); };
+  const str = id => $(id).value.trim();
+  localStorage.setItem(DIAG_CONFIG_KEY, JSON.stringify({
+    responseTimeWarn: num('dcfg-rt'),
+    repetitionWindowMin: num('dcfg-window') ?? DEFAULT_DIAG_CONFIG.repetitionWindowMin,
+    repetitionMinAttempts: num('dcfg-attempts') ?? DEFAULT_DIAG_CONFIG.repetitionMinAttempts,
+    expected: {
+      policySet: str('dcfg-policyset'), authn: str('dcfg-authn'), authz: str('dcfg-authz'),
+      profile: str('dcfg-profile'), method: str('dcfg-method'),
+    },
+  }));
+  if (lastSessions.length) renderSessions(lastSessions);
+  if (lastDiagnosis) renderDiagnosis(lastDiagnosis.mac, lastDiagnosis);
+}
+
+function loadDiagConfigForm() {
+  const cfg = diagConfig();
+  const set = (id, v) => { if ($(id)) $(id).value = v ?? ''; };
+  set('dcfg-rt', cfg.responseTimeWarn);
+  set('dcfg-window', cfg.repetitionWindowMin);
+  set('dcfg-attempts', cfg.repetitionMinAttempts);
+  set('dcfg-policyset', cfg.expected.policySet);
+  set('dcfg-authn', cfg.expected.authn);
+  set('dcfg-authz', cfg.expected.authz);
+  set('dcfg-profile', cfg.expected.profile);
+  set('dcfg-method', cfg.expected.method);
+}
+
+// ---- Dettaglio evento ----
+function kvList(pairs) {
+  return '<div class="attr-dump">' + pairs.map(([k, v]) => `<span><b>${esc(k)}</b> = ${esc(v)}</span>`).join('') + '</div>';
+}
+
+function checksHtml(checks) {
+  return '<div class="checks">' + checks.map(c => `<div class="check ${c.level}">`
+    + `<div class="check-head"><span class="badge lvl ${c.level}">${CHECK_LEVEL_LABEL[c.level]}</span> <b>${esc(c.title)}</b></div>`
+    + `<div class="check-result">${esc(c.result)}</div>`
+    + `<div class="attr-dump">${c.evidence.map(([k, v]) => `<span><b>${esc(k)}</b> = ${esc(v)}</span>`).join('')}</div>`
+    + (c.next ? `<div class="check-next">Controllo suggerito: ${esc(c.next)}</div>` : '')
+    + '</div>').join('') + '</div>';
+}
+
+// Campi mappati, redirect, discrepanze fra le due rappresentazioni degli attributi,
+// controlli rapidi, attributi della richiesta con provenienza e attributi della
+// risposta con i ripetuti conservati. Il token resta mascherato ovunque.
+function eventDetailBody(s, sum) {
+  const rd = redirectInfo(s);
+  const conflicts = attrModel(s).conflicts;
+  let html = '<div class="section-title">Campi mappati</div>'
+    + kvList(EVENT_COLUMNS.map(c => [c.label, columnText(c, s)]));
+  if (rd.source !== NOT_AVAILABLE) {
+    html += `<div class="section-title">Redirect al portale (origine: ${esc(rd.source)})</div>`
+      + kvList([['Host', rd.host ?? UNAVAILABLE], ['Porta', rd.port ?? UNAVAILABLE],
+                ['ACL di redirect', rd.acl ?? UNAVAILABLE], ['URL (token mascherato)', rd.masked ?? UNAVAILABLE]])
+      + '<div class="na">L’URL non viene aperto: da qui non parte nessuna richiesta verso il portale.</div>';
+  }
+  if (conflicts.length) {
+    html += '<div class="section-title">Discrepanze fra rappresentazioni</div>'
+      + kvList(conflicts.map(c => [c.key, `other_attributes = "${c.structured}" | other_attr_string = "${c.blob}"`]));
+  }
+  html += '<div class="section-title">Controlli rapidi</div>' + checksHtml(sum.checks);
+  const req = requestAttrEntries(s);
+  html += '<div class="section-title">Attributi ricevuti nella richiesta</div>'
+    + (req.length ? kvList(req.map(([k, v, o]) => [`${k} [${o}]`, maskToken(String(v))]))
+                  : '<div class="na">Nessun attributo di richiesta in questo evento.</div>');
+  const resp = responseAttrs(s);
+  html += '<div class="section-title">Attributi restituiti nella risposta</div>'
+    + (resp.length ? kvList(resp.map(([k, v]) => [k, maskToken(v)]))
+                   : '<div class="na">Nessun attributo di risposta in questo evento.</div>');
+  const raw = Object.entries(s).filter(([, v]) => typeof v === 'string' && v.trim() !== '');
+  html += '<div class="section-title">Campi grezzi restituiti da ISE</div>'
+    + (raw.length ? kvList(raw.map(([k, v]) => [k, maskToken(v)]))
+                  : '<div class="na">Nessun campo valorizzato in questa risposta.</div>');
+  return html;
+}
+
+function eventDetailRow(s, i, sum, colspan) {
+  return `<tr id="attrs-${i}" style="display:none"><td colspan="${colspan}">${eventDetailBody(s, sum)}</td></tr>`;
 }
 
 function toggleAttrs(i) {
@@ -824,39 +1444,52 @@ function toggleAttrs(i) {
   row.style.display = row.style.display === 'none' ? 'table-row' : 'none';
 }
 
+// I check di ogni riga si calcolano una volta sola per render: l'indicatore, il
+// dettaglio e l'export leggono lo stesso riepilogo, senza rieseguirli a ogni hover.
+let lastChecks = [];
+
+function diagBadgeCell(sum, i) {
+  const title = (sum.warnings ? sum.titles.join(' • ') : 'Nessuna anomalia rilevata dai controlli rapidi')
+    + (sum.insufficient ? ` • ${sum.insufficient} controlli senza dati sufficienti` : '');
+  return `<td><button class="badge diag ${sum.warnings ? 'warn' : 'ok'}" title="${esc(title)}" onclick="toggleAttrs(${i})">`
+    + `${sum.warnings} avvisi</button></td>`;
+}
+
 function renderSessions(sessions) {
   const box = $('ll-results');
+  // Unico punto che registra le righe mostrate: cambiare colonne o soglie
+  // ridisegna sempre le stesse sessioni, senza rifare la ricerca.
+  lastSessions = sessions;
+  renderColumnPicker();
   if (!sessions.length) { box.innerHTML = '<div class="empty">Nessuna sessione trovata.</div>'; return; }
   const colsBefore = ['user_name'];
   const colsAfter = ['calling_station_id','framed_ip_address','nas_ip_address','nas_port_id','session_status','posture_status'];
+  const cols = visibleColumns();
+  const cfg = diagConfig();
+  lastChecks = sessions.map(s => checkSummary(s, cfg, sessions));
+  const colspan = colsBefore.length + cols.length + colsAfter.length + 2;
   const th = c => `<th>${c.replace(/_/g,' ')}</th>`;
   const td = (s, c) => {
     const v = s[c] || '-';
     if (c === 'session_status' || c === 'posture_status') return `<td><span class="badge ${v}">${v}</span></td>`;
-    return `<td>${v}</td>`;
+    return `<td>${esc(v)}</td>`;
   };
-  let html = '<table><thead><tr>' + colsBefore.map(th).join('') + '<th>esito</th>' + colsAfter.map(th).join('')
-    + '<th>Metodo autenticazione</th><th>Protocollo autenticazione</th>'
-    + '<th>Policy Server</th><th>Policy set</th><th>Regola autenticazione</th><th>Regola autorizzazione</th><th>Profili autorizzazione</th><th>Azioni</th></tr></thead><tbody>';
+  let html = '<table><thead><tr>' + colsBefore.map(th).join('')
+    + cols.map(c => `<th>${esc(c.label)}</th>`).join('')
+    + colsAfter.map(th).join('')
+    + '<th title="Numero di anomalie rilevate dai controlli rapidi su questo evento">Diagnostica</th><th>Azioni</th></tr></thead><tbody>';
   sessions.forEach((s, i) => {
-    const p = policyOf(s);
-    const outcome = sessionOutcome(s);
-    const dot = `<td title="${OUTCOME_HINT[outcome]}"><span class="status-dot ${outcome}"></span> ${OUTCOME_LABEL[outcome]}</td>`;
-    html += '<tr>' + colsBefore.map(c => td(s, c)).join('') + dot + colsAfter.map(c => td(s, c)).join('')
-      + plainCell(authMethodOf(s))
-      + plainCell(authProtocolOf(s))
-      + `<td>${esc(policyServerOf(s))}</td>`
-      + ruleCell(p.policySet, 'set', null)
-      + ruleCell(p.authn, 'authn', p.policySet)
-      + ruleCell(p.authz, 'authz', p.policySet)
-      + profilesCell(s)
+    html += '<tr>' + colsBefore.map(c => td(s, c)).join('')
+      + cols.map(c => c.cell ? c.cell(s) : plainCell(c.value(s))).join('')
+      + colsAfter.map(c => td(s, c)).join('')
+      + diagBadgeCell(lastChecks[i], i)
       + `<td class="actions-cell">
-        <button class="secondary small" onclick="toggleAttrs(${i})">Campi ISE</button>
+        <button class="secondary small" onclick="toggleAttrs(${i})">Dettaglio evento</button>
         <button class="secondary small" onclick="gotoSwitchAt(${i})">Switch</button>
         <button class="secondary small" onclick="reauthAt(${i})">Riautentica</button>
         <button class="danger small" onclick="disconnectAt(${i})">Disconnetti</button>
       </td></tr>`
-      + attrRow(s, i);
+      + eventDetailRow(s, i, lastChecks[i], colspan);
   });
   html += '</tbody></table>';
   box.innerHTML = html;
@@ -1018,7 +1651,8 @@ async function loadAuthStatusForMacs() {
 }
 
 function kvCard(fields) {
-  return '<div class="kv-card">' + fields.map(([k, v]) => `<div class="kv"><span class="k">${k}</span><span>${v ?? UNAVAILABLE}</span></div>`).join('') + '</div>';
+  // I valori arrivano da ISE e finiscono in innerHTML: vanno sempre escapati.
+  return '<div class="kv-card">' + fields.map(([k, v]) => `<div class="kv"><span class="k">${esc(k)}</span><span>${v == null ? UNAVAILABLE : esc(v)}</span></div>`).join('') + '</div>';
 }
 
 async function loadEndpointContext(mac) {
@@ -1042,10 +1676,20 @@ async function loadEndpointContext(mac) {
   }
 }
 
+// Esporta le dieci colonne mappate (anche quelle non visibili), il riepilogo dei
+// controlli e i campi grezzi. Il token del portale resta mascherato anche nel file.
 function exportCsv() {
   if (!lastSessions.length) return;
-  const cols = Object.keys(lastSessions[0]);
-  const rows = [cols.join(',')].concat(lastSessions.map(s => cols.map(c => `"${(s[c] || '').toString().replace(/"/g,'""')}"`).join(',')));
+  const rawCols = [...new Set(lastSessions.flatMap(Object.keys))];
+  const cfg = diagConfig();
+  const q = v => `"${maskToken(String(v ?? '')).replace(/"/g, '""')}"`;
+  const header = EVENT_COLUMNS.map(c => c.label).concat(['Avvisi diagnostica'], rawCols);
+  const rows = [header.map(q).join(',')].concat(lastSessions.map((session, i) => {
+    const sum = lastChecks[i] || checkSummary(session, cfg, lastSessions);
+    return EVENT_COLUMNS.map(c => q(columnText(c, session)))
+      .concat([q(sum.warnings ? sum.warnings + ': ' + sum.titles.join(' | ') : '0')])
+      .concat(rawCols.map(c => q(session[c] ?? ''))).join(',');
+  }));
   const blob = new Blob([rows.join('\n')], { type: 'text/csv' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
@@ -1144,24 +1788,30 @@ function computeVerdict(sessions, authRecords, endpointCtx, switchOutput) {
 }
 
 let lastDiagnosis = null;
+let lastDiagChecks = null;
 
 function renderDiagnosis(mac, { sessions, authRecords, endpointCtx, switchOutput, switchError }) {
   const verdict = computeVerdict(sessions, authRecords, endpointCtx, switchOutput);
   lastDiagnosis = { mac, verdict, sessions, authRecords, endpointCtx, switchOutput, switchError };
   let html = `<div class="verdict ${verdict.level}">${verdict.text}</div>`;
 
+  const s0 = sessions[0];
+  const sum = s0 ? checkSummary(s0, diagConfig(), sessions.concat(authRecords)) : null;
+  lastDiagChecks = sum;
+
   html += '<div class="section-title">Sessione ISE</div>';
-  html += sessions.length ? kvCard([
-    ['Utente', sessions[0].user_name], ['Esito', OUTCOME_LABEL[sessionOutcome(sessions[0])]],
-    ['Tipo connessione', isWireless(sessions[0]) === null ? UNAVAILABLE : (isWireless(sessions[0]) ? 'Wireless' : 'Wired')],
-    ['NAS', sessions[0].nas_ip_address], ['Porta switch', sessions[0].nas_port_id], ['Policy Server', policyServerOf(sessions[0])],
-    ['Policy set', ruleText(policyOf(sessions[0]).policySet)],
-    ['Metodo autenticazione', ruleText(authMethodOf(sessions[0]))],
-    ['Protocollo autenticazione', ruleText(authProtocolOf(sessions[0]))],
-    ['Regola autenticazione', ruleText(policyOf(sessions[0]).authn)],
-    ['Regola autorizzazione', ruleText(policyOf(sessions[0]).authz)],
-    ['Profili autorizzazione', profilesText(sessions[0])],
+  html += s0 ? kvCard([
+    ['Utente', s0.user_name],
+    ...EVENT_COLUMNS.map(c => [c.label, columnText(c, s0)]),
+    ['Tipo connessione', isWireless(s0) === null ? UNAVAILABLE : (isWireless(s0) ? 'Wireless' : 'Wired')],
+    ['NAS', s0.nas_ip_address], ['Porta switch', s0.nas_port_id],
   ]) : '<div class="empty">Nessuna sessione attiva.</div>';
+
+  if (sum) {
+    html += `<div class="section-title">Controlli rapidi (${sum.warnings} anomalie, ${sum.insufficient} senza dati sufficienti)</div>`;
+    html += checksHtml(sum.checks);
+    html += `<details class="event-source"><summary>Apri l\u2019evento sorgente</summary>${eventDetailBody(s0, sum)}</details>`;
+  }
 
   html += '<div class="section-title">Storico autenticazioni (24h)</div>';
   html += authRecords.length ? kvCard(authRecords.slice(0, 5).map(r => {
@@ -1213,19 +1863,29 @@ async function runDiagnosis() {
 function exportDiagnosis() {
   if (!lastDiagnosis) return;
   const { mac, verdict, sessions, authRecords, endpointCtx, switchOutput, switchError } = lastDiagnosis;
-  const s = sessions[0] || {};
+  const s = sessions[0];
   let md = `# Diagnostica ISE - ${mac}\n\n`;
   md += `Generato: ${new Date().toLocaleString()}\n\n`;
   md += `## Verdetto\n${verdict.text}\n\n`;
   md += `## Sessione ISE\n`;
-  md += sessions.length
-    ? `- Utente: ${s.user_name || '-'}\n- Esito: ${OUTCOME_LABEL[sessionOutcome(s)]}\n- Tipo connessione: ${isWireless(s) === null ? UNAVAILABLE : (isWireless(s) ? 'Wireless' : 'Wired')}\n- NAS: ${s.nas_ip_address || '-'}\n- Porta switch: ${s.nas_port_id || '-'}\n- Metodo autenticazione: ${ruleText(authMethodOf(s))}\n- Protocollo autenticazione: ${ruleText(authProtocolOf(s))}\n- Policy Server: ${policyServerOf(s)}\n- Policy set: ${ruleText(policyOf(s).policySet)}\n- Regola autenticazione: ${ruleText(policyOf(s).authn)}\n- Regola autorizzazione: ${ruleText(policyOf(s).authz)}\n- Profili autorizzazione: ${profilesText(s)}\n\n`
+  md += s
+    ? [['Utente', s.user_name || '-']].concat(EVENT_COLUMNS.map(c => [c.label, columnText(c, s)]),
+        [['Tipo connessione', isWireless(s) === null ? UNAVAILABLE : (isWireless(s) ? 'Wireless' : 'Wired')],
+         ['NAS', s.nas_ip_address || '-'], ['Porta switch', s.nas_port_id || '-']])
+        .map(([k, v]) => `- ${k}: ${maskToken(String(v))}`).join('\n') + '\n\n'
     : 'Nessuna sessione attiva.\n\n';
+  if (lastDiagChecks) {
+    md += `## Controlli rapidi\n`;
+    md += lastDiagChecks.checks.map(c =>
+      `### ${c.title} — ${CHECK_LEVEL_LABEL[c.level]}\n${c.result}\n`
+      + c.evidence.map(([k, v]) => `- ${k}: ${v}`).join('\n')
+      + (c.next ? `\n- Controllo suggerito: ${c.next}` : '')).join('\n\n') + '\n\n';
+  }
   md += `## Storico autenticazioni (24h)\n`;
   md += authRecords.length
     ? authRecords.slice(0, 5).map(r => {
         const p = policyOf(r);
-        return `- ${r.acs_timestamp || r.timestamp || '-'}: ${authStatusOf(r) || UNAVAILABLE}${r.failure_reason ? ' — ' + r.failure_reason : ''} — Authn: ${ruleText(p.authn)} / Authz: ${ruleText(p.authz)}`;
+        return `- ${r.acs_timestamp || r.timestamp || '-'}: ${authStatusOf(r) || UNAVAILABLE}${r.failure_reason ? ' \u2014 ' + r.failure_reason : ''} \u2014 Authn: ${ruleText(p.authn)} / Authz: ${ruleText(p.authz)}`;
       }).join('\n') + '\n\n'
     : 'Nessun tentativo registrato.\n\n';
   md += `## Contesto endpoint (ERS)\n`;
@@ -1233,7 +1893,7 @@ function exportDiagnosis() {
     ? `- Gruppo identità: ${endpointCtx.identity_group || '-'}\n- Profile ID: ${endpointCtx.profile_id || '-'}\n\n`
     : 'Endpoint non profilato / ERS non disponibile.\n\n';
   md += `## Switch (show authentication)\n`;
-  md += switchOutput ? '```\n' + switchOutput + '\n```\n' : (switchError || 'Non eseguito.') + '\n';
+  md += switchOutput ? '```\n' + maskToken(switchOutput) + '\n```\n' : (switchError || 'Non eseguito.') + '\n';
   const blob = new Blob([md], { type: 'text/markdown' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
@@ -1440,6 +2100,9 @@ function renderAuthTable() {
   html += '</tbody></table>';
   box.innerHTML = html;
 }
+
+loadDiagConfigForm();
+renderColumnPicker();
 
 ['auth-only-failed', 'auth-filter-nas', 'auth-filter-reason'].forEach(id => {
   $(id).addEventListener('change', renderAuthTable);

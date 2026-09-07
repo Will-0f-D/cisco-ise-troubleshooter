@@ -302,3 +302,37 @@ if __name__ == "__main__":
         if name.startswith("test_"):
             fn()
     print("OK")
+
+
+def test_enrich_prefers_structured_and_keeps_the_discrepancy():
+    """Le due rappresentazioni dello stesso attributo non si sovrascrivono in
+    silenzio: vince other_attributes, ma la differenza resta consultabile."""
+    record = _enrich({
+        "other_attributes": "AuthorizationPolicyMatchedRule=Corp, ISEPolicySetName=Wired",
+        "other_attr_string": "AuthorizationPolicyMatchedRule=Guest:!:UseCase=Host Lookup",
+    })
+    parsed = record["other_attributes_parsed"]
+    assert parsed["AuthorizationPolicyMatchedRule"] == "Corp"
+    assert parsed["UseCase"] == "Host Lookup", "il blob resta il fallback per le chiavi mancanti"
+    assert record["other_attributes_sources"]["AuthorizationPolicyMatchedRule"] == "other_attributes"
+    assert record["other_attributes_sources"]["UseCase"] == "other_attr_string"
+    assert record["other_attributes_conflicts"] == [{
+        "key": "AuthorizationPolicyMatchedRule",
+        "other_attributes": "Corp",
+        "other_attr_string": "Guest",
+    }]
+
+
+def test_enrich_accepts_other_attributes_as_object():
+    """Alcuni percorsi consegnano other_attributes gia' strutturato: va usato com'e',
+    senza tentare di riparsarlo come blob."""
+    record = _enrich({"other_attributes": {"ISEPolicySetName": "SSID Guest Agenzie"}})
+    assert record["other_attributes_parsed"]["ISEPolicySetName"] == "SSID Guest Agenzie"
+
+
+def test_enrich_reports_no_conflict_when_both_agree():
+    record = _enrich({
+        "other_attributes": "UseCase=Host Lookup",
+        "other_attr_string": "UseCase=Host Lookup",
+    })
+    assert "other_attributes_conflicts" not in record

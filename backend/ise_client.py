@@ -85,20 +85,39 @@ def _parse_attr_blob(blob: str) -> dict:
 
 
 def _enrich(record: dict) -> dict:
-    """Espande i blob di attributi in other_attributes_parsed.
+    """Espande i blob di attributi in other_attributes_parsed, con la provenienza.
 
     Qui vivono i nomi delle regole applicate all'evento (IdentityPolicyMatchedRule,
     AuthorizationPolicyMatchedRule, ISEPolicySetName): ISE spesso non li emette come
     tag XML dedicati. Un blob assente, nullo o vuoto non produce nessuna chiave: un
     attributo mancante resta mancante, non diventa un valore vuoto.
+
+    Lo stesso attributo può comparire in entrambe le rappresentazioni. Vince quella
+    strutturata (other_attributes), l'altra fa da fallback, e se i due valori
+    differiscono la discrepanza viene conservata invece di essere sovrascritta in
+    silenzio: e' il frontend a mostrarla nel dettaglio dell'evento.
     """
-    parsed = {}
+    parsed: dict = {}
+    sources: dict = {}
+    conflicts: list[dict] = []
     for field in _ATTR_BLOB_FIELDS:
         blob = record.get(field)
-        if isinstance(blob, str) and "=" in blob:
-            parsed.update(_parse_attr_blob(blob))
+        if isinstance(blob, dict):
+            items = blob.items()
+        elif isinstance(blob, str) and "=" in blob:
+            items = _parse_attr_blob(blob).items()
+        else:
+            continue
+        for key, value in items:
+            if key not in parsed:
+                parsed[key], sources[key] = value, field
+            elif parsed[key] != value:
+                conflicts.append({"key": key, sources[key]: parsed[key], field: value})
     if parsed:
         record["other_attributes_parsed"] = parsed
+        record["other_attributes_sources"] = sources
+    if conflicts:
+        record["other_attributes_conflicts"] = conflicts
     return record
 
 
