@@ -568,8 +568,9 @@ async function searchLiveLog() {
 //     IdentityPolicyMatchedRule / AuthorizationPolicyMatchedRule / ISEPolicySetName
 //     anche quando i tag dedicati non vengono emessi (il backend lo espande in
 //     other_attributes_parsed).
-// La ricerca "Tutte le sessioni attive" usa lo schema ridotto simpleActiveSession,
-// che non contiene nessuno dei due: lì il dato è assente, non "nessuna policy".
+// "Tutte le sessioni attive" parte dallo schema ridotto simpleActiveSession, che non
+// contiene nessuno dei due: il backend completa ogni riga da Session/MACAddress. Se
+// quel dettaglio non arriva il dato resta assente, non "nessuna policy".
 const NOT_AVAILABLE = null;
 
 function otherAttrs(s) { return s.other_attributes_parsed || {}; }

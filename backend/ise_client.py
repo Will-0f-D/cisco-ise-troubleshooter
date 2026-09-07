@@ -118,12 +118,55 @@ async def get_session_by_username(host: str, username: str, password: str, ident
     return _parse_records(resp.text)
 
 
-async def get_active_sessions(host: str, username: str, password: str, verify_ssl: bool = False, port: int | None = None) -> list[dict]:
+# Session/ActiveList usa lo schema simpleActiveSession: 6 campi soli, senza
+# passed/failed e senza i nomi delle regole. L'unico modo documentato da Cisco per
+# avere gli attributi completi di una sessione attiva è rileggerla da
+# Session/MACAddress (schema restsdStatus). È una chiamata per sessione: tetto
+# massimo e concorrenza limitata per non sommergere il MNT.
+ACTIVE_ENRICH_LIMIT = 200
+
+
+def _merge_active_session(brief: dict, detail: list[dict]) -> dict:
+    """Sovrappone il record completo alla voce ridotta di ActiveList.
+
+    Se il MAC ha più sessioni si sceglie quella con lo stesso audit_session_id:
+    è l'unico identificativo comune ai due schemi. I campi di ActiveList
+    restano autorevoli, ma solo se valorizzati.
+    """
+    if not detail:
+        return brief
+    audit = brief.get("audit_session_id")
+    match = next((d for d in detail if audit and d.get("audit_session_id") == audit), detail[0])
+    return {**match, **{k: v for k, v in brief.items() if v}}
+
+
+async def get_active_sessions(
+    host: str, username: str, password: str, verify_ssl: bool = False,
+    port: int | None = None, enrich: bool = True,
+) -> list[dict]:
     resp = await _mnt_get(host, username, password, "Session/ActiveList", verify_ssl, port)
     if resp.status_code == 404:
         return []
     resp.raise_for_status()
-    return _parse_records(resp.text)
+    sessions = _parse_records(resp.text)
+    if not enrich:
+        return sessions
+
+    gate = asyncio.Semaphore(8)
+
+    async def full(brief: dict) -> dict:
+        mac = brief.get("calling_station_id")
+        if not mac:
+            return brief
+        async with gate:
+            try:
+                detail = await get_session_by_mac(host, username, password, mac, verify_ssl, port)
+            except Exception:
+                return brief  # dettaglio non recuperabile: il dato resta assente, non inventato
+        return _merge_active_session(brief, detail)
+
+    enriched = await asyncio.gather(*[full(s) for s in sessions[:ACTIVE_ENRICH_LIMIT]])
+    return [*enriched, *sessions[ACTIVE_ENRICH_LIMIT:]]
 
 
 async def get_auth_status(

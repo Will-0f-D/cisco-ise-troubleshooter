@@ -3,7 +3,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from ise_client import _normalize_rule, _parse_other_attributes, _parse_records  # noqa: E402
+from ise_client import (  # noqa: E402
+    _merge_active_session,
+    _normalize_rule,
+    _parse_other_attributes,
+    _parse_records,
+)
 
 SINGLE = """<?xml version="1.0"?>
 <sessionParameters>
@@ -139,6 +144,31 @@ def test_other_attributes_values_may_contain_commas_and_equals():
     assert parsed["AuthorizationPolicyMatchedRule"] == "CWA_Redirect"
     assert parsed["ISEPolicySetName"] == "Default"
     assert parsed["Response"].startswith("url-redirect=https://x/portal?a=1")
+
+
+def test_merge_active_session_picks_matching_audit_session():
+    """Stesso MAC, due sessioni: si sceglie per audit_session_id, non la prima."""
+    brief = {"user_name": "jdoe", "calling_station_id": "00:11:22:33:44:55",
+             "audit_session_id": "0A00000100000002", "server": "ise-psn-02"}
+    detail = [
+        {"audit_session_id": "0A00000100000001", "passed": "false", "authorization_policy": "Guest"},
+        {"audit_session_id": "0A00000100000002", "passed": "true", "authorization_policy": "Corp"},
+    ]
+    merged = _merge_active_session(brief, detail)
+    assert merged["authorization_policy"] == "Corp"
+    assert merged["passed"] == "true"
+    # I campi di ActiveList restano quelli della lista sessioni attive.
+    assert merged["server"] == "ise-psn-02"
+
+
+def test_merge_active_session_without_detail_invents_nothing():
+    brief = {"user_name": "jdoe", "calling_station_id": "00:11:22:33:44:55"}
+    assert _merge_active_session(brief, []) == brief
+
+
+def test_merge_active_session_keeps_detail_when_brief_field_empty():
+    merged = _merge_active_session({"user_name": ""}, [{"user_name": "jdoe", "passed": "true"}])
+    assert merged["user_name"] == "jdoe"
 
 
 def test_normalize_rule_reads_state_from_nested_rule():
