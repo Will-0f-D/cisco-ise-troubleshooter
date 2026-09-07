@@ -39,6 +39,12 @@ class AuthStatusQuery(IseCreds):
     records: int = 20
 
 
+class AuthStatusBulkQuery(IseCreds):
+    macs: list[str]
+    seconds: int = 86400
+    records: int = 20
+
+
 class EndpointContextQuery(IseCreds):
     mac: str
 
@@ -110,6 +116,16 @@ async def auth_status(q: AuthStatusQuery):
     try:
         return await ise_client.get_auth_status(
             q.host, q.username, q.password, q.mac, q.seconds, q.records, "All", q.verify_ssl, q.port
+        )
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/ise/authstatus/bulk")
+async def auth_status_bulk(q: AuthStatusBulkQuery):
+    try:
+        return await ise_client.get_auth_status_bulk(
+            q.host, q.username, q.password, q.macs, q.seconds, q.records, q.verify_ssl, q.port
         )
     except Exception as e:
         raise HTTPException(400, str(e))

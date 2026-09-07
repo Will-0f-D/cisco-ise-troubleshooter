@@ -271,7 +271,7 @@
 
       <div id="ll-authstatus-wrap" style="display:none">
         <div class="results-header">
-          <h3>Storico autenticazioni (pass/fail, ultime 24h)</h3>
+          <h3>Storico autenticazioni (pass/fail)</h3>
           <select id="ll-authstatus-filter" onchange="renderAuthStatus()">
             <option value="">Tutti gli esiti</option>
             <option value="passed">Solo riusciti</option>
@@ -551,11 +551,17 @@ async function searchLiveLog() {
     // rifatta a ogni auto-refresh né per riga.
     loadPolicyCatalog(false);
     sessions.forEach(s => addToWatchlist(macOf(s), s.user_name));
-    if (mode === 'mac' && value) { loadAuthStatus(value); loadEndpointContext(value); }
+    if (mode === 'mac' && value) {
+      // Un MAC che fallisce sempre non ha sessione: senza questo non entrerebbe
+      // mai in watchlist, cioè proprio quello da tenere d'occhio.
+      addToWatchlist(value, '');
+      loadAuthStatus(value); loadEndpointContext(value);
+    }
     else if (mode === 'user' && sessions.length && sessions[0].calling_station_id) {
       const mac = sessions[0].calling_station_id;
       loadAuthStatus(mac); loadEndpointContext(mac);
     }
+    if (mode === 'active') offerBulkAuthStatus(sessions);
     if (mode !== 'active' && value) pushHistory(mode, value);
   } catch (e) {
     $('ise-dot').className = 'dot err';
@@ -935,13 +941,18 @@ function authStatusOf(rec) {
 function renderAuthStatus() {
   const box = $('ll-authstatus');
   const filter = $('ll-authstatus-filter').value;
-  const records = filter ? lastAuthStatusRecords.filter(rec => authStatusOf(rec) === filter) : lastAuthStatusRecords;
-  if (!records.length) { box.innerHTML = '<div class="empty">Nessun tentativo di autenticazione corrispondente.</div>'; return; }
-  let html = '<table><thead><tr><th>Timestamp</th><th>Esito</th><th>Utente</th><th>Metodo</th><th>Protocollo</th><th>Policy set</th><th>Regola autenticazione</th><th>Regola autorizzazione</th><th>Profili autorizzazione</th><th>Motivo fallimento</th></tr></thead><tbody>';
+  // Un MAC non interrogabile va detto, non silenziato: sembrerebbe "nessun fallimento".
+  const errors = lastAuthStatusRecords.filter(rec => rec._error);
+  const records = lastAuthStatusRecords.filter(rec => !rec._error)
+    .filter(rec => !filter || authStatusOf(rec) === filter);
+  const errHtml = errors.map(e => `<div class="err-msg">${esc(e._mac)}: ${esc(e._error)}</div>`).join('');
+  if (!records.length) { box.innerHTML = errHtml + '<div class="empty">Nessun tentativo di autenticazione corrispondente.</div>'; return; }
+  let html = errHtml + '<table><thead><tr><th>Timestamp</th><th>MAC</th><th>Esito</th><th>Utente</th><th>Metodo</th><th>Protocollo</th><th>Policy set</th><th>Regola autenticazione</th><th>Regola autorizzazione</th><th>Profili autorizzazione</th><th>Motivo fallimento</th></tr></thead><tbody>';
   for (const rec of records) {
     const status = authStatusOf(rec);
     const p = policyOf(rec);
     html += `<tr><td>${esc(rec.acs_timestamp || rec.timestamp || '-')}</td>`
+      + `<td>${esc(rec._mac || rec.calling_station_id || '-')}</td>`
       + `<td><span class="badge ${status}">${status || UNAVAILABLE}</span></td><td>${esc(rec.user_name || '-')}</td>`
       + plainCell(authMethodOf(rec))
       + plainCell(authProtocolOf(rec))
@@ -969,7 +980,37 @@ async function loadAuthStatus(mac) {
     const records = await r.json();
     if (!r.ok) throw new Error(records.detail || 'errore');
     lastAuthStatusRecords = records;
-    if (!records.length) { box.innerHTML = '<div class="empty">Nessun tentativo di autenticazione nelle ultime 24h.</div>'; return; }
+    if (!records.length) { box.innerHTML = '<div class="empty">Nessun tentativo di autenticazione nelle ultime 24h per questo MAC.</div>'; return; }
+    renderAuthStatus();
+  } catch (e) {
+    box.innerHTML = `<div class="err-msg">${e.message}</div>`;
+  }
+}
+
+// La tabella Sessioni viene dal session directory di MnT, che crea una sessione
+// solo dalle autenticazioni riuscite: i tentativi falliti non ci sono e non ci
+// possono essere. Stanno in AuthStatus, che però interroga un MAC alla volta.
+function offerBulkAuthStatus(sessions) {
+  const macs = [...new Set(sessions.map(macOf).filter(Boolean))];
+  $('ll-authstatus-wrap').style.display = '';
+  $('ll-authstatus').innerHTML = macs.length
+    ? `<div class="empty">La tabella Sessioni elenca solo sessioni stabilite: i tentativi falliti non vi compaiono.
+       <button class="secondary small" onclick="loadAuthStatusForMacs()">Carica pass/fail (10 giorni) per i ${macs.length} MAC elencati</button></div>`
+    : '<div class="empty">Nessun MAC nelle sessioni attive.</div>';
+}
+
+async function loadAuthStatusForMacs() {
+  const macs = [...new Set(lastSessions.map(macOf).filter(Boolean))];
+  const box = $('ll-authstatus');
+  box.innerHTML = '<div class="empty">Caricamento...</div>';
+  try {
+    // 864000 s = 10 giorni: e' il massimo accettato da AuthStatus (oltre, ISE rifiuta).
+    const body = { ...iseCreds(), macs, seconds: 864000, records: 30 };
+    const r = await fetch('/api/ise/authstatus/bulk', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(body) });
+    const records = await r.json();
+    if (!r.ok) throw new Error(records.detail || 'errore');
+    lastAuthStatusRecords = records;
+    if (!records.length) { box.innerHTML = '<div class="empty">Nessun tentativo registrato per questi MAC.</div>'; return; }
     renderAuthStatus();
   } catch (e) {
     box.innerHTML = `<div class="err-msg">${e.message}</div>`;

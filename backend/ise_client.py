@@ -235,6 +235,36 @@ async def get_auth_status(
     return _parse_records(resp.text)
 
 
+# AuthStatus interroga un MAC alla volta: non esiste una variante "tutti gli
+# endpoint". Per vedere i tentativi falliti di più MAC si itera, con lo stesso
+# tetto e la stessa concorrenza usati per l'arricchimento delle sessioni attive.
+AUTHSTATUS_BULK_LIMIT = 100
+
+
+async def get_auth_status_bulk(
+    host: str, username: str, password: str, macs: list[str],
+    seconds: int = 86400, records: int = 20,
+    verify_ssl: bool = False, port: int | None = None,
+) -> list[dict]:
+    """Tentativi (riusciti e falliti) per una lista di MAC, ognuno marcato con _mac.
+
+    Un MAC che fallisce la chiamata non blocca gli altri: produce una riga
+    {"_mac": ..., "_error": ...} così la UI può dirlo invece di mostrare il vuoto.
+    """
+    gate = asyncio.Semaphore(8)
+
+    async def one(mac: str) -> list[dict]:
+        async with gate:
+            try:
+                found = await get_auth_status(host, username, password, mac, seconds, records, "All", verify_ssl, port)
+            except Exception as e:
+                return [{"_mac": mac, "_error": str(e)}]
+        return [{**r, "_mac": mac} for r in found]
+
+    batches = await asyncio.gather(*[one(m) for m in macs[:AUTHSTATUS_BULK_LIMIT] if m])
+    return [r for batch in batches for r in batch]
+
+
 async def coa_reauth(
     host: str, username: str, password: str, psn_name: str, mac: str,
     reauth_type: int = 0, verify_ssl: bool = False, port: int | None = None,

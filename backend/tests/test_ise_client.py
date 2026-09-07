@@ -3,6 +3,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import asyncio  # noqa: E402
+
+import ise_client  # noqa: E402
 from ise_client import (  # noqa: E402
     _enrich,
     _mac,
@@ -250,6 +253,34 @@ def test_session_response_exposes_rules_from_attr_string():
     assert parsed["IdentityPolicyMatchedRule"] == "Wireless MAB"
     assert parsed["AuthorizationPolicyMatchedRule"] == "GuestDemanio-Auth-ISE02"
     assert record["user_name"] == "guest01"
+
+
+def test_auth_status_bulk_tags_mac_and_isolates_failures(monkeypatch):
+    """AuthStatus interroga un MAC alla volta: un MAC che va in errore non deve
+    far sparire i tentativi degli altri, altrimenti sembra 'nessun fallimento'."""
+    async def fake(host, user, pwd, mac, seconds, records, attrs, verify_ssl, port):
+        if mac == "00:00:00:00:00:BAD":
+            raise RuntimeError("timeout MNT")
+        return [{"passed": "false", "failed": "true", "failure_reason": "22056"}]
+
+    monkeypatch.setattr(ise_client, "get_auth_status", fake)
+    rows = asyncio.run(ise_client.get_auth_status_bulk(
+        "h", "u", "p", ["00:11:22:33:44:55", "00:00:00:00:00:BAD"]))
+    assert rows[0]["_mac"] == "00:11:22:33:44:55"
+    assert rows[0]["failed"] == "true"
+    assert rows[1] == {"_mac": "00:00:00:00:00:BAD", "_error": "timeout MNT"}
+
+
+def test_auth_status_bulk_caps_the_number_of_calls(monkeypatch):
+    calls = []
+
+    async def fake(host, user, pwd, mac, seconds, records, attrs, verify_ssl, port):
+        calls.append(mac)
+        return []
+
+    monkeypatch.setattr(ise_client, "get_auth_status", fake)
+    asyncio.run(ise_client.get_auth_status_bulk("h", "u", "p", [f"m{i}" for i in range(150)]))
+    assert len(calls) == ise_client.AUTHSTATUS_BULK_LIMIT
 
 
 def test_normalize_rule_reads_state_from_nested_rule():
