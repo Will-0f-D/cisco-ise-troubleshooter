@@ -87,6 +87,7 @@
   .badge { padding: 2px 8px; border-radius: 20px; font-size: 11px; font-weight: 600; }
   .badge.AUTHENTICATED, .badge.STARTED, .badge.AUTHORIZED, .badge.passed { background: #123d2b; color: var(--ok); }
   .badge.FAILED, .badge.DISCONNECTED, .badge.failed { background: #3d1414; color: var(--err); }
+  .badge.warn { background: #2a2110; color: var(--warn); }
   .actions-cell { display: flex; gap: 6px; }
 
   .console { background: #05080b; border: 1px solid var(--border); border-radius: 8px; padding: 14px; font-family: var(--mono); font-size: 13px; white-space: pre-wrap; min-height: 320px; max-height: 60vh; overflow-y: auto; }
@@ -490,17 +491,29 @@ async function searchLiveLog() {
   }
 }
 
+// Nome del campo XML per le policy matched non è documentato ufficialmente da Cisco:
+// si prova un elenco di varianti note (snake_case e camelCase), tollerante come il
+// resto del parsing MNT. Se resta vuoto, controllare la risposta grezza in DevTools.
+function policyOf(s) {
+  const authn = s.authen_rule || s.authentication_policy_matched_rule || s.authenticationPolicyMatched
+    || s.authentication_rule || s.selected_authentication_identity_stores || '-';
+  const authz = s.az_rule || s.authorization_policy_matched_rule || s.authorizationPolicyMatched
+    || s.authorization_rule || s.authorization_profile || s.authorization_policy || '-';
+  return { authn, authz };
+}
+
 function renderSessions(sessions) {
   const box = $('ll-results');
   if (!sessions.length) { box.innerHTML = '<div class="empty">Nessuna sessione trovata.</div>'; return; }
   const cols = ['user_name','calling_station_id','framed_ip_address','nas_ip_address','nas_port_id','session_status','posture_status','acs_server'];
-  let html = '<table><thead><tr>' + cols.map(c => `<th>${c.replace(/_/g,' ')}</th>`).join('') + '<th>Azioni</th></tr></thead><tbody>';
+  let html = '<table><thead><tr>' + cols.map(c => `<th>${c.replace(/_/g,' ')}</th>`).join('') + '<th>Policy autenticazione</th><th>Policy autorizzazione</th><th>Azioni</th></tr></thead><tbody>';
   sessions.forEach((s, i) => {
+    const p = policyOf(s);
     html += '<tr>' + cols.map(c => {
       const v = s[c] || '-';
       if (c === 'session_status' || c === 'posture_status') return `<td><span class="badge ${v}">${v}</span></td>`;
       return `<td>${v}</td>`;
-    }).join('') + `<td class="actions-cell">
+    }).join('') + `<td>${p.authn}</td><td>${p.authz}</td><td class="actions-cell">
         <button class="secondary small" onclick="gotoSwitchAt(${i})">Switch</button>
         <button class="secondary small" onclick="reauthAt(${i})">Riautentica</button>
         <button class="danger small" onclick="disconnectAt(${i})">Disconnetti</button>
@@ -753,21 +766,45 @@ function exportDiagnosis() {
 }
 
 // ---- Licenze e Deployment (Open API) ----
+// Alcuni endpoint Open API incapsulano il payload in {response: ..., version: ...},
+// altri (es. tier-state) restituiscono l'array direttamente: si prova a scartare il wrapper.
+function unwrapResponse(obj) {
+  return (obj && typeof obj === 'object' && !Array.isArray(obj) && obj.response !== undefined) ? obj.response : obj;
+}
+
 function renderGenericObject(obj) {
   if (obj == null) return '<div class="empty">Nessun dato.</div>';
   if (obj.error) return `<div class="err-msg">${obj.error}</div>`;
   const entries = Object.entries(obj);
   if (!entries.length) return '<div class="empty">Vuoto.</div>';
-  return kvCard(entries.map(([k, v]) => [k, typeof v === 'object' && v !== null ? JSON.stringify(v) : v]));
+  return kvCard(entries.map(([k, v]) => {
+    if (Array.isArray(v)) return [k, v.every(x => typeof x !== 'object') ? v.join(', ') : JSON.stringify(v)];
+    return [k, typeof v === 'object' && v !== null ? JSON.stringify(v) : v];
+  }));
+}
+
+// tier-state: array di {name, status, compliance, consumptionCounter, daysOutOfCompliance, lastAuthorization}
+function renderLicenseTiers(data) {
+  if (data && data.error) return `<div class="err-msg">${data.error}</div>`;
+  const list = Array.isArray(data) ? data : unwrapResponse(data);
+  if (!Array.isArray(list)) return renderGenericObject(data);
+  if (!list.length) return '<div class="empty">Nessuna licenza.</div>';
+  const complianceClass = c => ({ COMPLIANT: 'passed', EVALUATION: 'warn' }[(c || '').toUpperCase()] || (c ? 'failed' : ''));
+  let html = '<table><thead><tr><th>Tier</th><th>Stato</th><th>Conformità</th><th>In uso</th><th>Giorni non conformità</th><th>Ultima autorizzazione</th></tr></thead><tbody>';
+  for (const t of list) {
+    html += `<tr><td>${t.name || '-'}</td><td>${t.status || '-'}</td><td><span class="badge ${complianceClass(t.compliance)}">${t.compliance || '-'}</span></td><td>${t.consumptionCounter ?? '-'}</td><td>${t.daysOutOfCompliance ?? '-'}</td><td>${t.lastAuthorization || '-'}</td></tr>`;
+  }
+  html += '</tbody></table>';
+  return html;
 }
 
 async function loadLicenseStatus() {
   ['license-tier', 'license-eval', 'license-registration'].forEach(id => $(id).innerHTML = '<div class="empty">Caricamento...</div>');
   try {
     const status = await postJson('/api/ise/license/status', iseCreds());
-    $('license-tier').innerHTML = renderGenericObject(status.tier_state);
-    $('license-eval').innerHTML = renderGenericObject(status.eval_license);
-    $('license-registration').innerHTML = renderGenericObject(status.registration);
+    $('license-tier').innerHTML = renderLicenseTiers(status.tier_state);
+    $('license-eval').innerHTML = renderGenericObject(unwrapResponse(status.eval_license));
+    $('license-registration').innerHTML = renderGenericObject(unwrapResponse(status.registration));
   } catch (e) {
     const msg = `<div class="err-msg">${e.message}</div>`;
     $('license-tier').innerHTML = msg;
@@ -843,8 +880,15 @@ function coaLogFor(mac) {
 }
 
 const COA_CORRELATION_WINDOW_MS = 5 * 60 * 1000;
+// ISE a volte restituisce il timestamp come epoch-ms in una stringa: new Date("1725...")
+// non lo interpreta (non è ISO), va passato come Number.
+function parseTs(v) {
+  if (v == null || v === '') return NaN;
+  if (/^\d+$/.test(String(v).trim())) return Number(v);
+  return new Date(v).getTime();
+}
 function findCoaMarkers(mac, recordTs) {
-  const t = new Date(recordTs).getTime();
+  const t = parseTs(recordTs);
   if (isNaN(t)) return [];
   return coaLogFor(mac).filter(l => Math.abs(l.ts - t) <= COA_CORRELATION_WINDOW_MS);
 }
@@ -866,7 +910,7 @@ async function loadAuthWatchlist() {
       rows.push({ _mac: w.mac, _error: e.message });
     }
   }
-  rows.sort((a, b) => new Date(b.acs_timestamp || b.timestamp || 0) - new Date(a.acs_timestamp || a.timestamp || 0));
+  rows.sort((a, b) => parseTs(b.acs_timestamp || b.timestamp) - parseTs(a.acs_timestamp || a.timestamp));
   lastAuthRows = rows;
   populateAuthFilters(rows);
   renderAuthTable();
