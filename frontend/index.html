@@ -41,8 +41,58 @@
   .status-dot.conflict { background: var(--warn); box-shadow: 0 0 6px var(--warn); }
   .na { color: var(--text-dim); font-style: italic; }
   .catalog-status { font-size: 11px; color: var(--text-dim); }
-.attr-dump { display: flex; flex-wrap: wrap; gap: 4px 16px; font-family: Consolas, monospace; font-size: 11px; color: var(--text-dim); max-height: 240px; overflow: auto; padding: 6px 2px; }
-.attr-dump b { color: var(--text); font-weight: 600; }
+  .attr-dump { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 3px 12px;
+    font-family: var(--mono); font-size: 11px; color: var(--text-dim); max-height: 260px; overflow: auto; padding: 4px 0; }
+  .attr-dump > span { background: #0c1218; border: 1px solid var(--border); border-radius: 5px; padding: 4px 9px; overflow-wrap: anywhere; }
+  .attr-dump b { color: var(--text); font-weight: 600; }
+
+  /* Selettore delle colonne del Live Log */
+  .col-picker { display: flex; flex-wrap: wrap; gap: 6px 8px; margin: 8px 0 12px; }
+  .col-pick { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-dim);
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: 20px; padding: 4px 12px; cursor: pointer; }
+  .col-pick:hover { color: var(--text); border-color: var(--accent); }
+  .col-pick input { accent-color: var(--accent); margin: 0; cursor: pointer; }
+  .col-pick:has(input:checked) { color: var(--text); background: #10202a; border-color: var(--accent-dim); }
+
+  /* Indicatore Diagnostica nella tabella */
+  .badge.diag { cursor: pointer; font: inherit; font-size: 11px; font-weight: 600; padding: 3px 10px; margin: 0; border: 1px solid transparent; }
+  .badge.diag.ok { background: #0d2a1c; color: var(--ok); border-color: #123d2b; }
+  .badge.diag.warn { background: #2a2110; color: var(--warn); border-color: #4d3a12; }
+  .badge.diag:hover { filter: brightness(1.35); }
+
+  /* Riga di dettaglio dell'evento: fuori dalla griglia stretta della tabella */
+  .detail-cell { white-space: normal; background: #0b1117; padding: 4px 16px 16px; }
+  .detail-cell .section-title { margin: 16px 0 6px; }
+  .detail-cell .kv-card { margin-bottom: 0; }
+  .detail-cell .na { display: block; margin-top: 6px; font-size: 12px; }
+
+  /* Controlli rapidi */
+  .checks { display: grid; gap: 10px; margin: 6px 0; }
+  .check { background: var(--panel-2); border: 1px solid var(--border); border-left: 3px solid var(--text-dim);
+    border-radius: 8px; padding: 10px 14px; }
+  .check.warn { border-left-color: var(--warn); }
+  .check.info { border-left-color: var(--ok); }
+  .check-head { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+  .badge.lvl { font-size: 10px; letter-spacing: .4px; text-transform: uppercase; padding: 2px 8px; white-space: nowrap; }
+  .badge.lvl.warn { background: #2a2110; color: var(--warn); }
+  .badge.lvl.info { background: #0d2a1c; color: var(--ok); }
+  .badge.lvl.insufficient { background: #1b232d; color: var(--text-dim); }
+  .check-result { margin: 7px 0 0; font-size: 13px; line-height: 1.45; }
+  .evidence { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+  .ev { background: #0c1218; border: 1px solid var(--border); border-radius: 6px; padding: 3px 9px;
+    font-family: var(--mono); font-size: 11px; color: var(--text-dim); overflow-wrap: anywhere; max-width: 100%; }
+  .ev b { color: var(--text); font-weight: 600; }
+  .check-next { font-size: 12px; color: var(--text-dim); margin-top: 9px; padding-top: 8px; border-top: 1px dashed var(--border); }
+  .check-next::before { content: '92 '; color: var(--accent); }
+
+  /* Valori attesi e soglie dei controlli */
+  .diag-config { background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; margin: 0 0 16px; }
+  .diag-config summary { cursor: pointer; color: var(--accent); font-size: 12px; text-transform: uppercase; letter-spacing: .5px; }
+  .diag-config p { margin: 8px 0 0; }
+  .dcfg-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px 16px; margin: 12px 0; }
+  .dcfg-grid label { margin: 0; }
+  .event-source { margin-top: 18px; border-top: 1px solid var(--border); padding-top: 10px; }
+  .event-source summary { cursor: pointer; color: var(--accent); font-size: 12px; }
   .badge.cfg { background: #14222e; color: var(--text-dim); font-weight: 500; margin-left: 6px; }
   .badge.cfg.enabled { color: var(--ok); }
   .badge.cfg.disabled { color: var(--warn); }
@@ -1396,7 +1446,7 @@ function checksHtml(checks) {
   return '<div class="checks">' + checks.map(c => `<div class="check ${c.level}">`
     + `<div class="check-head"><span class="badge lvl ${c.level}">${CHECK_LEVEL_LABEL[c.level]}</span> <b>${esc(c.title)}</b></div>`
     + `<div class="check-result">${esc(c.result)}</div>`
-    + `<div class="attr-dump">${c.evidence.map(([k, v]) => `<span><b>${esc(k)}</b> = ${esc(v)}</span>`).join('')}</div>`
+    + (c.evidence.length ? `<div class="evidence">${c.evidence.map(([k, v]) => `<span class="ev"><b>${esc(k)}</b> ${esc(v)}</span>`).join('')}</div>` : '')
     + (c.next ? `<div class="check-next">Controllo suggerito: ${esc(c.next)}</div>` : '')
     + '</div>').join('') + '</div>';
 }
@@ -1408,16 +1458,16 @@ function eventDetailBody(s, sum) {
   const rd = redirectInfo(s);
   const conflicts = attrModel(s).conflicts;
   let html = '<div class="section-title">Campi mappati</div>'
-    + kvList(EVENT_COLUMNS.map(c => [c.label, columnText(c, s)]));
+    + kvCard(EVENT_COLUMNS.map(c => [c.label, columnText(c, s)]));
   if (rd.source !== NOT_AVAILABLE) {
     html += `<div class="section-title">Redirect al portale (origine: ${esc(rd.source)})</div>`
-      + kvList([['Host', rd.host ?? UNAVAILABLE], ['Porta', rd.port ?? UNAVAILABLE],
+      + kvCard([['Host', rd.host ?? UNAVAILABLE], ['Porta', rd.port ?? UNAVAILABLE],
                 ['ACL di redirect', rd.acl ?? UNAVAILABLE], ['URL (token mascherato)', rd.masked ?? UNAVAILABLE]])
       + '<div class="na">L’URL non viene aperto: da qui non parte nessuna richiesta verso il portale.</div>';
   }
   if (conflicts.length) {
     html += '<div class="section-title">Discrepanze fra rappresentazioni</div>'
-      + kvList(conflicts.map(c => [c.key, `other_attributes = "${c.structured}" | other_attr_string = "${c.blob}"`]));
+      + kvCard(conflicts.map(c => [c.key, `other_attributes = "${c.structured}" | other_attr_string = "${c.blob}"`]));
   }
   html += '<div class="section-title">Controlli rapidi</div>' + checksHtml(sum.checks);
   const req = requestAttrEntries(s);
@@ -1436,7 +1486,7 @@ function eventDetailBody(s, sum) {
 }
 
 function eventDetailRow(s, i, sum, colspan) {
-  return `<tr id="attrs-${i}" style="display:none"><td colspan="${colspan}">${eventDetailBody(s, sum)}</td></tr>`;
+  return `<tr id="attrs-${i}" style="display:none"><td class="detail-cell" colspan="${colspan}">${eventDetailBody(s, sum)}</td></tr>`;
 }
 
 function toggleAttrs(i) {
