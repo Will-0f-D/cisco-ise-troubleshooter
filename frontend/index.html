@@ -40,6 +40,8 @@
   .status-dot.unknown { background: var(--text-dim); }
   .na { color: var(--text-dim); font-style: italic; }
   .catalog-status { font-size: 11px; color: var(--text-dim); }
+.attr-dump { display: flex; flex-wrap: wrap; gap: 4px 16px; font-family: Consolas, monospace; font-size: 11px; color: var(--text-dim); max-height: 240px; overflow: auto; padding: 6px 2px; }
+.attr-dump b { color: var(--text); font-weight: 600; }
   .badge.cfg { background: #14222e; color: var(--text-dim); font-weight: 500; margin-left: 6px; }
   .badge.cfg.enabled { color: var(--ok); }
   .badge.cfg.disabled { color: var(--warn); }
@@ -580,12 +582,31 @@ function firstValue(...candidates) {
   return v === undefined ? NOT_AVAILABLE : v.trim();
 }
 
+// Lo schema di sessione ISE dichiara un centinaio di elementi opzionali e i nomi
+// cambiano tra endpoint e versioni (authorization_policy su Session/*,
+// AuthorizationPolicyMatchedRule dentro other_attributes su AuthStatus). Dopo i nomi
+// noti si cerca quindi anche per forma del nome, ma solo tra le chiavi che ISE ha
+// davvero restituito: è un modo di leggere di più, non di inventare.
+function matchKey(s, wanted, unwanted) {
+  for (const src of [s, otherAttrs(s)]) {
+    for (const [k, v] of Object.entries(src)) {
+      if (typeof v !== 'string' || v.trim() === '') continue;
+      const flat = k.replace(/[_\-.]/g, '').toLowerCase();
+      if (wanted.test(flat) && !(unwanted && unwanted.test(flat))) return v.trim();
+    }
+  }
+  return NOT_AVAILABLE;
+}
+
 function policyOf(s) {
   const oa = otherAttrs(s);
   return {
-    policySet: firstValue(oa.ISEPolicySetName, s.policy_set_name),
-    authn: firstValue(s.identity_policy_matched_rule, oa.IdentityPolicyMatchedRule),
-    authz: firstValue(s.authorization_policy, oa.AuthorizationPolicyMatchedRule),
+    policySet: firstValue(oa.ISEPolicySetName, s.policy_set_name)
+      ?? matchKey(s, /policyset/),
+    authn: firstValue(s.identity_policy_matched_rule, oa.IdentityPolicyMatchedRule)
+      ?? matchKey(s, /(identity|authentication)polic/, /authoriz|profile|store/),
+    authz: firstValue(s.authorization_policy, oa.AuthorizationPolicyMatchedRule, s.azn_exp_pol_matched_rule)
+      ?? matchKey(s, /authoriz.*polic|azn.*(polic|matchedrule)/, /profile/),
     serviceSelection: firstValue(s.service_selection_policy, oa.ServiceSelectionMatchedRule),
   };
 }
@@ -598,7 +619,8 @@ function policyServerOf(s) { return s.acs_server || s.server || '-'; }
 // restituiti (presente anche nel set base di restAuthStatus). dacl/vlan NON sono il
 // profilo: restano un'informazione separata, non un ripiego che ne prende il posto.
 function profilesOf(s) {
-  const raw = firstValue(s.selected_azn_profiles, s.sel_exp_azn_profiles, otherAttrs(s).SelectedAuthorizationProfiles);
+  const raw = firstValue(s.selected_azn_profiles, s.sel_exp_azn_profiles, otherAttrs(s).SelectedAuthorizationProfiles)
+    ?? matchKey(s, /aznprofile|authorizationprofile/);
   return raw === NOT_AVAILABLE ? NOT_AVAILABLE : raw.split(',').map(p => p.trim()).filter(Boolean);
 }
 
@@ -736,6 +758,24 @@ function sessionOutcome(s) {
 
 const OUTCOME_LABEL = { ok: 'autenticazione riuscita', err: 'autenticazione fallita', unknown: 'esito non disponibile su questo endpoint ISE' };
 
+// Ogni ISE popola un sottoinsieme diverso del centinaio di campi opzionali dello
+// schema. Quando una colonna resta "n/d" questo mostra cosa ISE ha realmente
+// restituito per quella riga, senza dover leggere l'XML a mano.
+function attrRow(s, i) {
+  const fields = Object.entries(s)
+    .filter(([, v]) => typeof v === 'string' && v.trim() !== '')
+    .concat(Object.entries(otherAttrs(s)).map(([k, v]) => ['other_attributes.' + k, v]));
+  const body = fields.length
+    ? fields.map(([k, v]) => `<span><b>${esc(k)}</b> = ${esc(v)}</span>`).join('')
+    : '<span class="na">Nessun campo valorizzato in questa risposta.</span>';
+  return `<tr id="attrs-${i}" style="display:none"><td colspan="16"><div class="attr-dump">${body}</div></td></tr>`;
+}
+
+function toggleAttrs(i) {
+  const row = $('attrs-' + i);
+  row.style.display = row.style.display === 'none' ? 'table-row' : 'none';
+}
+
 function renderSessions(sessions) {
   const box = $('ll-results');
   if (!sessions.length) { box.innerHTML = '<div class="empty">Nessuna sessione trovata.</div>'; return; }
@@ -761,10 +801,12 @@ function renderSessions(sessions) {
       + ruleCell(p.authz, 'authz', p.policySet)
       + profilesCell(s)
       + `<td class="actions-cell">
+        <button class="secondary small" onclick="toggleAttrs(${i})">Campi ISE</button>
         <button class="secondary small" onclick="gotoSwitchAt(${i})">Switch</button>
         <button class="secondary small" onclick="reauthAt(${i})">Riautentica</button>
         <button class="danger small" onclick="disconnectAt(${i})">Disconnetti</button>
-      </td></tr>`;
+      </td></tr>`
+      + attrRow(s, i);
   });
   html += '</tbody></table>';
   box.innerHTML = html;

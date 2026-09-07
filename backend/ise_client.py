@@ -102,8 +102,20 @@ async def test_connection(host: str, username: str, password: str, verify_ssl: b
     return True
 
 
+def _mac(mac: str) -> str:
+    """ISE accetta il MAC solo maiuscolo e nel formato XX:XX:XX:XX:XX:XX.
+
+    Un MAC minuscolo o in notazione Cisco (aabb.ccdd.eeff) non produce un errore:
+    ISE risponde "nessuna sessione", indistinguibile da un MAC davvero assente.
+    """
+    hexs = re.sub(r"[^0-9A-Fa-f]", "", mac)
+    if len(hexs) == 12:
+        return ":".join(hexs[i:i + 2] for i in range(0, 12, 2)).upper()
+    return mac.strip().upper()
+
+
 async def get_session_by_mac(host: str, username: str, password: str, mac: str, verify_ssl: bool = False, port: int | None = None) -> list[dict]:
-    resp = await _mnt_get(host, username, password, f"Session/MACAddress/{mac}", verify_ssl, port)
+    resp = await _mnt_get(host, username, password, f"Session/MACAddress/{_mac(mac)}", verify_ssl, port)
     if resp.status_code == 404:
         return []
     resp.raise_for_status()
@@ -175,7 +187,7 @@ async def get_auth_status(
     verify_ssl: bool = False, port: int | None = None,
 ) -> list[dict]:
     """RADIUS authentication attempts (pass + fail) for a MAC, including failure_reason."""
-    resp = await _mnt_get(host, username, password, f"AuthStatus/MACAddress/{mac}/{seconds}/{records}/{attrs}", verify_ssl, port)
+    resp = await _mnt_get(host, username, password, f"AuthStatus/MACAddress/{_mac(mac)}/{seconds}/{records}/{attrs}", verify_ssl, port)
     if resp.status_code == 404:
         return []
     resp.raise_for_status()
@@ -187,7 +199,7 @@ async def coa_reauth(
     reauth_type: int = 0, verify_ssl: bool = False, port: int | None = None,
 ) -> str:
     """reauth_type: 0=default, 1=last, 2=rerun."""
-    resp = await _mnt_get(host, username, password, f"CoA/Reauth/{psn_name}/{mac}/{reauth_type}", verify_ssl, port)
+    resp = await _mnt_get(host, username, password, f"CoA/Reauth/{psn_name}/{_mac(mac)}/{reauth_type}", verify_ssl, port)
     resp.raise_for_status()
     return resp.text.strip()
 
@@ -198,7 +210,7 @@ async def coa_disconnect(
     verify_ssl: bool = False, port: int | None = None,
 ) -> str:
     """disconnect_type: 0=default, 1=port-bounce, 2=disconnect. Community-reported format."""
-    resp = await _mnt_get(host, username, password, f"CoA/Disconnect/{mnt_node}/{mac}/{disconnect_type}/{switch_ip}/{psn_ip}", verify_ssl, port)
+    resp = await _mnt_get(host, username, password, f"CoA/Disconnect/{mnt_node}/{_mac(mac)}/{disconnect_type}/{switch_ip}/{psn_ip}", verify_ssl, port)
     resp.raise_for_status()
     return resp.text.strip()
 
@@ -338,7 +350,7 @@ async def _ers_get(host: str, username: str, password: str, path: str, verify_ss
 
 async def get_endpoint_context(host: str, username: str, password: str, mac: str, verify_ssl: bool = False, port: int | None = None) -> dict | None:
     """Profiling/identity-group context for a MAC via ERS. Returns None if the endpoint is unknown to ISE."""
-    search = await _ers_get(host, username, password, f"endpoint?filter=mac.EQ.{mac}", verify_ssl, port)
+    search = await _ers_get(host, username, password, f"endpoint?filter=mac.EQ.{_mac(mac)}", verify_ssl, port)
     if search.status_code == 404:
         return None
     search.raise_for_status()

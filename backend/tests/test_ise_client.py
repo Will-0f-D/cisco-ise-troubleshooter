@@ -4,6 +4,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from ise_client import (  # noqa: E402
+    _mac,
     _merge_active_session,
     _normalize_rule,
     _parse_other_attributes,
@@ -144,6 +145,16 @@ def test_other_attributes_values_may_contain_commas_and_equals():
     assert parsed["AuthorizationPolicyMatchedRule"] == "CWA_Redirect"
     assert parsed["ISEPolicySetName"] == "Default"
     assert parsed["Response"].startswith("url-redirect=https://x/portal?a=1")
+
+
+def test_mac_normalized_to_ise_format():
+    """ISE accetta solo maiuscolo/XX:XX:...: un formato diverso risponde 'nessuna
+    sessione' invece di dare errore, e le colonne restano vuote senza spiegazione."""
+    assert _mac("00:0c:29:46:f3:b8") == "00:0C:29:46:F3:B8"
+    assert _mac("000c.2946.f3b8") == "00:0C:29:46:F3:B8"
+    assert _mac("00-0C-29-46-F3-B8") == "00:0C:29:46:F3:B8"
+    # Input non riconoscibile: non va reinventato, passa così com'è.
+    assert _mac(" non-un-mac ") == "NON-UN-MAC"
 
 
 def test_merge_active_session_picks_matching_audit_session():

@@ -29,6 +29,7 @@ const helpers = [
   'const NOT_AVAILABLE = null;',  // asserito sotto contro il sorgente
   grab('function otherAttrs(s)'),
   grab('function firstValue('),
+  grab('function matchKey('),
   grab('function policyOf(s)'),
   grab('function profilesOf(s)'),
   grab('function indexCatalog(catalog)'),
@@ -72,6 +73,15 @@ assert.deepEqual(
 assert.equal(policyOf({ user_name: 'x' }).authz, null);
 // Stringa vuota dall'XML vale come assente, non come nome di regola.
 assert.equal(policyOf({ authorization_policy: '   ' }).authz, null);
+
+// Nomi non previsti dalla whitelist ma inequivocabili nella forma: ISE cambia i tag
+// tra endpoint e versioni, quindi vanno letti lo stesso.
+assert.equal(policyOf({ authorization_policy_matched_rule: 'Corp' }).authz, 'Corp');
+assert.equal(policyOf({ AuthenticationPolicyMatchedRule: 'Dot1X' }).authn, 'Dot1X');
+assert.equal(policyOf({ other_attributes_parsed: { PolicySetName: 'Wired' } }).policySet, 'Wired');
+// La ricerca per forma non deve rubare il campo sbagliato.
+assert.equal(policyOf({ authorization_policy_matched_rule: 'Corp' }).authn, null);
+assert.equal(policyOf({ identity_store: 'AD', identity_group: 'Corp' }).authn, null);
 
 assert.deepEqual(profilesOf({ selected_azn_profiles: 'PermitAccess, Corp_VLAN' }), ['PermitAccess', 'Corp_VLAN']);
 assert.equal(profilesOf({ dacl: 'ACL-X', vlan: '10' }), null, 'dacl/vlan non sono un profilo di autorizzazione');
