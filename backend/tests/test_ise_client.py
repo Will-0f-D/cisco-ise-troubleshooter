@@ -182,6 +182,25 @@ def test_merge_active_session_keeps_detail_when_brief_field_empty():
     assert merged["user_name"] == "jdoe"
 
 
+def test_other_attributes_real_policy_names():
+    """Valori reali da ISE: il nome della regola contiene spazi e trattini, e alcune
+    chiavi ISE contengono uno spazio ('Device Type'): senza ammetterlo finivano
+    dentro il valore della chiave precedente."""
+    parsed = _parse_other_attributes(
+        "ConfigVersionId=145,"
+        "IdentityPolicyMatchedRule=WiFi PEAP - SDA Mobile-Workstation - AuthC,"
+        "AuthorizationPolicyMatchedRule=WiFi_Dipendenti_PEAP_Mobile,"
+        "EndPointMACAddress=00-0C-29-46-F3-B8,"
+        "Device Type=Device Type#All Device Types#WLC,"
+        "Location=Location#All Locations#Milano"
+    )
+    assert parsed["IdentityPolicyMatchedRule"] == "WiFi PEAP - SDA Mobile-Workstation - AuthC"
+    assert parsed["AuthorizationPolicyMatchedRule"] == "WiFi_Dipendenti_PEAP_Mobile"
+    assert parsed["EndPointMACAddress"] == "00-0C-29-46-F3-B8"
+    assert parsed["Device Type"] == "Device Type#All Device Types#WLC"
+    assert parsed["Location"] == "Location#All Locations#Milano"
+
+
 def test_normalize_rule_reads_state_from_nested_rule():
     item = {"rule": {"id": "r1", "name": "FMC Admin", "state": "enabled", "rank": 0, "default": False},
             "profile": ["FMC-Admin"], "securityGroup": None}

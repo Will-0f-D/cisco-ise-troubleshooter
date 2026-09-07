@@ -31,6 +31,8 @@ const helpers = [
   grab('function firstValue('),
   grab('function matchKey('),
   grab('function policyOf(s)'),
+  grab('function authMethodOf(s)'),
+  grab('function authProtocolOf(s)'),
   grab('function profilesOf(s)'),
   grab('function indexCatalog(catalog)'),
   grab('let policyCatalog = ') + ';',
@@ -40,9 +42,10 @@ const helpers = [
 assert.ok(src.includes('const NOT_AVAILABLE = null;'), 'NOT_AVAILABLE non e piu null in index.html');
 
 const api = new Function(helpers + `
-  return { sessionOutcome, isWireless, authStatusOf, policyOf, profilesOf, indexCatalog, configuredRule,
+  return { sessionOutcome, isWireless, authStatusOf, policyOf, profilesOf, authMethodOf, authProtocolOf, indexCatalog, configuredRule,
            setCatalog: c => { policyCatalog = c; } };`)();
-const { sessionOutcome, isWireless, authStatusOf, policyOf, profilesOf, indexCatalog, configuredRule } = api;
+const { sessionOutcome, isWireless, authStatusOf, policyOf, profilesOf, authMethodOf, authProtocolOf,
+        indexCatalog, configuredRule } = api;
 
 // L'XML MNT arriva appiattito in stringhe: "false" non deve passare per vero.
 assert.equal(sessionOutcome({ passed: 'true', failed: 'false' }), 'ok');
@@ -82,6 +85,26 @@ assert.equal(policyOf({ other_attributes_parsed: { PolicySetName: 'Wired' } }).p
 // La ricerca per forma non deve rubare il campo sbagliato.
 assert.equal(policyOf({ authorization_policy_matched_rule: 'Corp' }).authn, null);
 assert.equal(policyOf({ identity_store: 'AD', identity_group: 'Corp' }).authn, null);
+
+// Payload reale riportato dall'utente: i nomi delle regole arrivano dentro
+// other_attributes e contengono spazi e trattini.
+const REALE = {
+  other_attributes_parsed: {
+    IdentityPolicyMatchedRule: 'WiFi PEAP - SDA Mobile-Workstation - AuthC',
+    AuthorizationPolicyMatchedRule: 'WiFi_Dipendenti_PEAP_Mobile',
+  },
+  authentication_method: 'dot1x',
+  authentication_protocol: 'PEAP (EAP-MSCHAPv2)',
+};
+assert.equal(policyOf(REALE).authn, 'WiFi PEAP - SDA Mobile-Workstation - AuthC');
+assert.equal(policyOf(REALE).authz, 'WiFi_Dipendenti_PEAP_Mobile');
+assert.equal(authMethodOf(REALE), 'dot1x');
+assert.equal(authProtocolOf(REALE), 'PEAP (EAP-MSCHAPv2)');
+// Nomi alternativi secondo endpoint/versione.
+assert.equal(authProtocolOf({ authen_protocol: 'PEAP (EAP-MSCHAPv2)' }), 'PEAP (EAP-MSCHAPv2)');
+assert.equal(authProtocolOf({ eap_authentication: 'EAP-MSCHAPv2' }), 'EAP-MSCHAPv2');
+assert.equal(authMethodOf({ user_name: 'x' }), null);
+assert.equal(authProtocolOf({ user_name: 'x' }), null);
 
 assert.deepEqual(profilesOf({ selected_azn_profiles: 'PermitAccess, Corp_VLAN' }), ['PermitAccess', 'Corp_VLAN']);
 assert.equal(profilesOf({ dacl: 'ACL-X', vlan: '10' }), null, 'dacl/vlan non sono un profilo di autorizzazione');

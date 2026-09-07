@@ -624,6 +624,28 @@ function profilesOf(s) {
   return raw === NOT_AVAILABLE ? NOT_AVAILABLE : raw.split(',').map(p => p.trim()).filter(Boolean);
 }
 
+// Metodo (dot1x / mab / ...) e protocollo EAP negoziato. I nomi dei tag cambiano
+// per endpoint e versione: lo schema di sessione usa authen_protocol, AuthStatus
+// eap_authentication, e in other_attributes compaiono le forme CamelCase.
+function authMethodOf(s) {
+  return firstValue(s.authentication_method, otherAttrs(s).AuthenticationMethod)
+    ?? matchKey(s, /authenticationmethod/);
+}
+
+function authProtocolOf(s) {
+  const oa = otherAttrs(s);
+  return firstValue(s.authentication_protocol, s.authen_protocol, s.eap_authentication,
+                    oa.AuthenticationProtocol, oa.EapAuthentication, oa.EapTunnel)
+    ?? matchKey(s, /auth.*protocol|eapauthentication/);
+}
+
+// Valore semplice dell'evento, senza correlazione con la configurazione.
+function plainCell(v) {
+  return v === NOT_AVAILABLE
+    ? `<td><span class="na" title="Campo non restituito da questo endpoint ISE per questa sessione">n/d</span></td>`
+    : `<td>${esc(v)}</td>`;
+}
+
 function esc(s) {
   return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 }
@@ -768,7 +790,7 @@ function attrRow(s, i) {
   const body = fields.length
     ? fields.map(([k, v]) => `<span><b>${esc(k)}</b> = ${esc(v)}</span>`).join('')
     : '<span class="na">Nessun campo valorizzato in questa risposta.</span>';
-  return `<tr id="attrs-${i}" style="display:none"><td colspan="16"><div class="attr-dump">${body}</div></td></tr>`;
+  return `<tr id="attrs-${i}" style="display:none"><td colspan="17"><div class="attr-dump">${body}</div></td></tr>`;
 }
 
 function toggleAttrs(i) {
@@ -788,6 +810,7 @@ function renderSessions(sessions) {
     return `<td>${v}</td>`;
   };
   let html = '<table><thead><tr><th>tipo connessione</th>' + colsBefore.map(th).join('') + '<th>esito</th>' + colsAfter.map(th).join('')
+    + '<th>Metodo autenticazione</th><th>Protocollo autenticazione</th>'
     + '<th>Policy Server</th><th>Policy set</th><th>Regola autenticazione</th><th>Regola autorizzazione</th><th>Profili autorizzazione</th><th>Azioni</th></tr></thead><tbody>';
   sessions.forEach((s, i) => {
     const p = policyOf(s);
@@ -795,7 +818,9 @@ function renderSessions(sessions) {
     const dot = `<td><span class="status-dot ${outcome}" title="${OUTCOME_LABEL[outcome]}"></span></td>`;
     const wifi = isWireless(s);
     html += `<tr><td>${wifi === null ? 'N/D' : (wifi ? 'Wireless' : 'Wired')}</td>` + colsBefore.map(c => td(s, c)).join('') + dot + colsAfter.map(c => td(s, c)).join('')
-      + `<td>${policyServerOf(s)}</td>`
+      + plainCell(authMethodOf(s))
+      + plainCell(authProtocolOf(s))
+      + `<td>${esc(policyServerOf(s))}</td>`
       + ruleCell(p.policySet, 'set', null)
       + ruleCell(p.authn, 'authn', p.policySet)
       + ruleCell(p.authz, 'authz', p.policySet)
@@ -893,12 +918,14 @@ function renderAuthStatus() {
   const filter = $('ll-authstatus-filter').value;
   const records = filter ? lastAuthStatusRecords.filter(rec => authStatusOf(rec) === filter) : lastAuthStatusRecords;
   if (!records.length) { box.innerHTML = '<div class="empty">Nessun tentativo di autenticazione corrispondente.</div>'; return; }
-  let html = '<table><thead><tr><th>Timestamp</th><th>Esito</th><th>Utente</th><th>Policy set</th><th>Regola autenticazione</th><th>Regola autorizzazione</th><th>Profili autorizzazione</th><th>Motivo fallimento</th></tr></thead><tbody>';
+  let html = '<table><thead><tr><th>Timestamp</th><th>Esito</th><th>Utente</th><th>Metodo</th><th>Protocollo</th><th>Policy set</th><th>Regola autenticazione</th><th>Regola autorizzazione</th><th>Profili autorizzazione</th><th>Motivo fallimento</th></tr></thead><tbody>';
   for (const rec of records) {
     const status = authStatusOf(rec);
     const p = policyOf(rec);
     html += `<tr><td>${esc(rec.acs_timestamp || rec.timestamp || '-')}</td>`
       + `<td><span class="badge ${status}">${status || 'n/d'}</span></td><td>${esc(rec.user_name || '-')}</td>`
+      + plainCell(authMethodOf(rec))
+      + plainCell(authProtocolOf(rec))
       + ruleCell(p.policySet, 'set', null)
       + ruleCell(p.authn, 'authn', p.policySet)
       + ruleCell(p.authz, 'authz', p.policySet)
@@ -1069,6 +1096,8 @@ function renderDiagnosis(mac, { sessions, authRecords, endpointCtx, switchOutput
     ['Tipo connessione', isWireless(sessions[0]) === null ? 'N/D' : (isWireless(sessions[0]) ? 'Wireless' : 'Wired')],
     ['NAS', sessions[0].nas_ip_address], ['Porta switch', sessions[0].nas_port_id], ['Policy Server', policyServerOf(sessions[0])],
     ['Policy set', ruleText(policyOf(sessions[0]).policySet)],
+    ['Metodo autenticazione', ruleText(authMethodOf(sessions[0]))],
+    ['Protocollo autenticazione', ruleText(authProtocolOf(sessions[0]))],
     ['Regola autenticazione', ruleText(policyOf(sessions[0]).authn)],
     ['Regola autorizzazione', ruleText(policyOf(sessions[0]).authz)],
     ['Profili autorizzazione', profilesText(sessions[0])],
@@ -1130,7 +1159,7 @@ function exportDiagnosis() {
   md += `## Verdetto\n${verdict.text}\n\n`;
   md += `## Sessione ISE\n`;
   md += sessions.length
-    ? `- Utente: ${s.user_name || '-'}\n- Esito: ${OUTCOME_LABEL[sessionOutcome(s)]}\n- Tipo connessione: ${isWireless(s) === null ? 'N/D' : (isWireless(s) ? 'Wireless' : 'Wired')}\n- NAS: ${s.nas_ip_address || '-'}\n- Porta switch: ${s.nas_port_id || '-'}\n- Policy Server: ${policyServerOf(s)}\n- Policy set: ${ruleText(policyOf(s).policySet)}\n- Regola autenticazione: ${ruleText(policyOf(s).authn)}\n- Regola autorizzazione: ${ruleText(policyOf(s).authz)}\n- Profili autorizzazione: ${profilesText(s)}\n\n`
+    ? `- Utente: ${s.user_name || '-'}\n- Esito: ${OUTCOME_LABEL[sessionOutcome(s)]}\n- Tipo connessione: ${isWireless(s) === null ? 'N/D' : (isWireless(s) ? 'Wireless' : 'Wired')}\n- NAS: ${s.nas_ip_address || '-'}\n- Porta switch: ${s.nas_port_id || '-'}\n- Metodo autenticazione: ${ruleText(authMethodOf(s))}\n- Protocollo autenticazione: ${ruleText(authProtocolOf(s))}\n- Policy Server: ${policyServerOf(s)}\n- Policy set: ${ruleText(policyOf(s).policySet)}\n- Regola autenticazione: ${ruleText(policyOf(s).authn)}\n- Regola autorizzazione: ${ruleText(policyOf(s).authz)}\n- Profili autorizzazione: ${profilesText(s)}\n\n`
     : 'Nessuna sessione attiva.\n\n';
   md += `## Storico autenticazioni (24h)\n`;
   md += authRecords.length
@@ -1330,7 +1359,7 @@ function renderAuthTable() {
   if (!rows.length && !errors.length) { box.innerHTML = '<div class="empty">Nessun risultato per i filtri correnti.</div>'; return; }
 
   let html = errors.map(e => `<div class="err-msg">${e._mac}: ${e._error}</div>`).join('');
-  html += '<table><thead><tr><th>Timestamp</th><th>MAC</th><th>Esito</th><th>Utente</th><th>NAS</th><th>Policy set</th><th>Regola autenticazione</th><th>Regola autorizzazione</th><th>Motivo fallimento</th><th>CoA correlato</th></tr></thead><tbody>';
+  html += '<table><thead><tr><th>Timestamp</th><th>MAC</th><th>Esito</th><th>Utente</th><th>NAS</th><th>Metodo</th><th>Protocollo</th><th>Policy set</th><th>Regola autenticazione</th><th>Regola autorizzazione</th><th>Motivo fallimento</th><th>CoA correlato</th></tr></thead><tbody>';
   for (const r of rows) {
     const ts = r.acs_timestamp || r.timestamp || '-';
     const status = authStatusOf(r);
@@ -1341,6 +1370,8 @@ function renderAuthTable() {
       : '-';
     html += `<tr><td>${esc(ts)}</td><td>${esc(r._mac)}</td><td><span class="badge ${status}">${status || 'n/d'}</span></td>`
       + `<td>${esc(r.user_name || '-')}</td><td>${esc(r.nas_ip_address || '-')}</td>`
+      + plainCell(authMethodOf(r))
+      + plainCell(authProtocolOf(r))
       + ruleCell(p.policySet, 'set', null)
       + ruleCell(p.authn, 'authn', p.policySet)
       + ruleCell(p.authz, 'authz', p.policySet)

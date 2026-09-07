@@ -40,7 +40,9 @@ _RECORD_TAGS = ("sessionParameters", "activeSession", "authStatusElements", "acc
 
 # Blob "key=value,key=value" di other_attributes. Il valore può contenere virgole
 # e '=' (es. url-redirect), quindi si spezza solo prima di una chiave riconoscibile.
-_OTHER_ATTR_KEY = re.compile(r"(?:^|,)\s*([A-Za-z0-9_.\-]+)=")
+# Alcune chiavi ISE contengono uno spazio ("Device Type", "Model Name", "Software
+# Version"): senza ammetterlo finiscono dentro il valore della chiave precedente.
+_OTHER_ATTR_KEY = re.compile(r"(?:^|,)\s*([A-Za-z0-9_.\-]+(?: [A-Za-z0-9_.\-]+)*)=")
 
 
 def _parse_other_attributes(blob: str) -> dict:
